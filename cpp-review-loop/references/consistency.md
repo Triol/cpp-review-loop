@@ -115,7 +115,7 @@ C 和 C++ 是两套语言。大型 C++ 项目里 C 残留是渐进腐化的主�
 
 | 检查项 | 为什么 | 信号 |
 |---|---|---|
-| 时间获取不统一（`time()` / chrono / `GetTickCount` 混用） | 项目有 `now_ms()` 之类封装时，绕过者让"伪造时间做测试"失效，时区/单位也可能不一致 | 脚本 *Wrapper-bypass candidates* 给各来源计数；注意墙钟（system_clock/time）与单调钟（steady_clock）用途本就不同，分用途后再判 |
+| 时间获取不统一（`time()` / chrono / `GetTickCount` / `gettimeofday*`（含 `butil::gettimeofday_us`）/ `spdk_get_ticks` 等混用） | 项目有 `now_ms()` 之类封装时，绕过者让"伪造时间做测试"失效，时区/单位也可能不一致；第三方框架自带的时间源同样是"来源"之一 | 脚本 *Wrapper-bypass candidates* 给各来源计数；注意墙钟（system_clock/time/gettimeofday）与单调钟（steady_clock/spdk_get_ticks）用途本就不同，分用途后再判 |
 | 同一设施多套实现并存（如两个 CRC 函数/查找表） | 实现各自漂移，结果不一致且难排查 | 脚本按标识符计数，≥2 个不同名实现即候选 |
 | 随机数来源混用（`rand()` vs `<random>`） | `rand()` 无线程安全保证且质量差；项目若已封装随机源，散点绕过即偏离 | 脚本计数 |
 | 判定顺序 | 1) grep 封装名定位统一封装 → 2) 封装存在时，直调标准库的散点按文件归组报 Minor → 3) 封装不存在但多来源并存，作为"建议收敛到单一封装"的系统性建议 | 手动 + 脚本 |

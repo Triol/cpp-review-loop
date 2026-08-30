@@ -135,9 +135,15 @@ WRAPPER_TIME_RES = [
     ("time()/std::time", re.compile(r"(?<!::)\btime\s*\(\s*(?:NULL|nullptr|0)\s*\)|\bstd::time\s*\(")),
     ("chrono::system_clock", re.compile(r"\bchrono::system_clock\b")),
     ("chrono::steady_clock", re.compile(r"\bchrono::steady_clock\b")),
+    ("gettimeofday*", re.compile(r"gettimeofday")),  # libc + butil::gettimeofday_us 等
+    ("clock_gettime", re.compile(r"\bclock_gettime\b")),
     ("GetTickCount*", re.compile(r"\bGetTickCount(?:64)?\b")),
     ("GetSystemTime/LocalTime", re.compile(r"\bGet(?:System|Local)Time\b")),
+    ("QueryPerformanceCounter", re.compile(r"\bQueryPerformanceCounter\b")),
+    ("timeGetTime", re.compile(r"\btimeGetTime\b")),
     ("clock()", re.compile(r"\bclock\s*\(\s*\)")),
+    ("spdk_get_ticks", re.compile(r"\bspdk_get_ticks\b")),
+    ("boost::chrono", re.compile(r"boost::chrono\b")),
 ]
 WRAPPER_RAND_RES = [
     ("rand()/srand()", re.compile(r"\b(?:srand|rand)\s*\(")),

@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>C++ 代码审查报告</title>
+<style>
+:root{
+  --bg:#f6f7f9; --card:#fff; --ink:#1a1d21; --muted:#6b7280; --line:#e5e7eb;
+  --blocker:#dc2626; --major:#ea580c; --minor:#ca8a04; --nit:#6b7280;
+  --accept:#16a34a; --discuss:#2563eb; --reject:#9ca3af; --accent:#2563eb;
+}
+*{box-sizing:border-box}
+html{overflow-x:clip}
+body{margin:0;font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--ink);font-size:14px;line-height:1.65}
+.wrap{max-width:960px;margin:0 auto;padding:24px 16px 120px}
+header h1{font-size:22px;margin:0 0 4px}
+.meta{color:var(--muted);font-size:13px;margin-bottom:12px}
+.summary{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:12px;white-space:pre-wrap}
+.hint{background:#eef4ff;border:1px solid #c7d8ff;border-radius:10px;padding:10px 14px;font-size:13px;margin:12px 0}
+.toolbar{position:sticky;top:0;z-index:30;background:var(--bg);margin:0 calc(50% - 50vw);padding:10px calc(50vw - 50%);border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:8px;align-items:center;transform:translateZ(0)}
+.chip{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:4px 12px;cursor:pointer;font-size:13px}
+.chip.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+.prog{margin-left:auto;font-size:13px;color:var(--muted)}
+button.act{border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:8px;padding:6px 14px;cursor:pointer;font-size:13px}
+button.act.ghost{background:var(--card);color:var(--accent)}
+h2{font-size:16px;margin:20px 0 8px}
+.pattern{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin-bottom:10px}
+.pattern b{display:block;margin-bottom:4px}
+.pattern .ex{color:var(--muted);font-size:12.5px;margin-top:4px}
+.card{background:var(--card);border:1px solid var(--line);border-left-width:4px;border-radius:10px;padding:14px 16px;margin-bottom:12px}
+.card.s-blocker{--sev:var(--blocker);border-left-color:var(--sev)}
+.card.s-major{--sev:var(--major);border-left-color:var(--sev)}
+.card.s-minor{--sev:var(--minor);border-left-color:var(--sev)}
+.card.s-nit{--sev:var(--nit);border-left-color:var(--sev)}
+.card.v-accept,.card.v-discuss,.card.v-custom{outline:2px solid var(--sev)}
+.card.v-reject{opacity:.55}
+.fid{position:relative;display:inline-block;font-family:Consolas,monospace;font-weight:700;font-size:15px;color:#fff;background:var(--sev,#334155);border-radius:6px;padding:1px 8px;margin-right:8px;cursor:pointer;user-select:none;vertical-align:1px}
+.fid:hover{filter:brightness(1.12)}
+.fid::after{content:"点击复制";position:absolute;left:50%;top:-24px;transform:translateX(-50%);background:#111827;color:#fff;font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;font-size:11px;font-weight:400;padding:2px 8px;border-radius:4px;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .15s;z-index:6}
+.fid:hover::after{opacity:1}
+.fid.copied::after{content:"已复制 ✓";opacity:1}
+.sev{display:inline-block;font-size:12px;font-weight:600;border-radius:6px;padding:1px 8px;color:#fff}
+.sev.blocker{background:var(--blocker)}
+.sev.major{background:var(--major)}
+.sev.minor{background:var(--minor)}
+.sev.nit{background:var(--nit)}
+.loc{font-family:Consolas,monospace;font-size:12.5px;color:var(--muted);margin-left:8px}
+.card h3{font-size:15px;margin:8px 0 6px}
+.card .why{margin:4px 0}
+.card .fix{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:8px 10px;margin:6px 0}
+.card .fix b{color:var(--accept)}
+.verdicts{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.vbtn{border:1px solid var(--line);background:var(--card);border-radius:8px;padding:5px 14px;cursor:pointer;font-size:13px}
+.vbtn.accept.on{background:var(--accept);border-color:var(--accept);color:#fff}
+.vbtn.reject.on{background:var(--reject);border-color:var(--reject);color:#fff}
+.vbtn.discuss.on{background:var(--discuss);border-color:var(--discuss);color:#fff}
+.vbtn.custom.on{background:#7c3aed;border-color:#7c3aed;color:#fff}
+.comment{width:100%;margin-top:8px;border:1px solid var(--line);border-radius:8px;padding:8px;font:inherit;min-height:44px;resize:vertical;background:#fafafa}
+.hidden{display:none!important}
+footer.note{color:var(--muted);font-size:12.5px;margin-top:24px}
+#modal{position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:100}
+#modal .box{background:#fff;border-radius:12px;padding:16px;max-width:640px;width:92%}
+#modal textarea{width:100%;height:300px;font-family:Consolas,monospace;font-size:12px;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>C++ 代码审查报告</h1>
+  <div class="meta" id="meta"></div>
+  <div class="summary" id="summary"></div>
+  <div class="hint">逐项选择处理方式（可加意见；只写意见未点按钮的项会按「待讨论」随反馈一起导出），完成后点「<b>导出反馈 JSON</b>」，把下载的文件放回本报告同目录；然后在你的编码 agent（ZCode / Claude Code / DeepSeek 等能加载本 skill 的工具）里说：<b>处理审查反馈，按反馈修复</b>（反馈文件即刚导出的 JSON，文件名见上方元信息）。刷新页面不丢已填内容（本地自动保存）。</div>
+</header>
+<div class="toolbar">
+  <span style="font-size:13px;color:var(--muted)">严重度</span>
+  <span id="sevchips"></span>
+  <select id="stfilter" class="chip" style="padding:4px 8px">
+    <option value="">全部状态</option>
+    <option value="none">未处理</option>
+    <option value="accept">已采纳</option>
+    <option value="reject">已驳回</option>
+    <option value="discuss">待讨论</option>
+    <option value="custom">已自定义</option>
+  </select>
+  <span class="prog" id="prog"></span>
+  <button class="act" id="btn-export">导出反馈 JSON</button>
+  <button class="act ghost" id="btn-copy">复制反馈 JSON</button>
+</div>
+<main>
+  <div id="systemic-sec" class="hidden">
+    <h2>系统性模式</h2>
+    <div id="systemic"></div>
+  </div>
+  <h2>发现明细（<span id="fcount"></span>）</h2>
+  <div id="findings"></div>
+</main>
+<footer class="note" id="genat"></footer>
+</div>
+<div id="modal" class="hidden">
+  <div class="box">
+    <b>反馈 JSON（剪贴板不可用，请手动全选复制）</b>
+    <textarea id="modal-ta" readonly></textarea>
+    <div style="text-align:right;margin-top:8px"><button class="act ghost" id="modal-close">关闭</button></div>
+  </div>
+</div>
+<script id="review-data" type="application/json">{
+ "review": {
+  "repo": "F:/workspace/claude_playground/skill/c++program/skill-eval/task-scheduler",
+  "scope": "whole repo",
+  "coverage": "覆盖：全量深读全部 8 个 C++ 文件（918 行，include/ 4 个头文件 + src/ 4 个实现）与 2 个 CMakeLists 构建文件；运行 hotspots.py 做热点与一致性测量（命名、头文件卫生、红旗模式均逐一开上下文核实）；未覆盖：未执行编译与运行（未验证运行时行为与 Windows/POSIX 分支的实际差异）、无 git 历史故无 churn 分析、静态分析器：本机有 clang-tidy（LLVM 20.1.2）但无法解析标准库头（工具链 include 路径缺失，按规范不为审查搭工具链，已跳过；cppcheck 未安装），以下结论均来自人工阅读。",
+  "date": "2026-08-30",
+  "generated_at": "2026-08-30 17:04:22",
+  "report_name": "code-review-report.html",
+  "feedback_file": "code-review-report-feedback.json",
+  "findings_file": "F:/workspace/claude_playground/skill/c++program/skill-eval/task-scheduler/code-review-findings.json"
+ },
+ "summary": "全量审查了仓库全部 8 个 C++ 文件（918 行）与 2 个 CMake 构建文件。整体健康度高：TaskScheduler 的并发设计正确（任务在锁外执行、构造函数异常安全、优先级比较器与懒取消语义经逐行核对无误），legacy C 持久化模块边界有清晰的文档化约定，命名与头文件风格高度统一，未发现 Blocker。最需要关注的三件事：一、persistence 的 result_writer_close 与并发 append 存在 use-after-free 且句柄生命周期契约未文档化（唯一 Major）；二、配置校验有缺口（validate() 缺 worker_threads 上限检查、构造函数不校验 config）；三、项目零测试覆盖，核心纯逻辑（堆序、取消、排空、配置解析）极易测却无测试。",
+ "systemic": [
+  {
+   "id": "S1",
+   "title": "对外边界的取值校验与生命周期契约缺口",
+   "count": 3,
+   "examples": [
+    "src/config.cpp:90",
+    "include/task_scheduler.h:48",
+    "include/persistence.h:51"
+   ],
+   "recommendation": "统一边界约定：(1) validate() 必须覆盖头文件声明的全部取值范围，TaskScheduler 构造函数对 config 再做一次断言；(2) 所有跨模块句柄（Metrics&、result_writer_t*）在头文件注释中写明生命周期与关闭时序（谁须比谁活得久、close 前须静默）。两处都是纯文档加几行校验的低成本修复。"
+  }
+ ],
+ "findings": [
+  {
+   "id": "F1",
+   "severity": "Major",
+   "category": "concurrency",
+   "file": "src/persistence.cpp",
+   "line": 203,
+   "title": "result_writer_close 与并发 append/flush 存在 use-after-free，且句柄生命周期契约未文档化",
+   "detail": "close() 在释放内部锁之后才 delete 对象（194–203 行）：若另一线程正阻塞在 append() 的 w->mtx 上（或尚在进入临界区之前），随后锁到的是已析构的 mutex 并访问已释放内存，属 UB。persistence.h 只写了“调用后句柄不可再用”，没有任何一处说明 close 必须等所有在途 append/flush 返回；task_scheduler.h:48 的构造注释也只约定了 metrics 的生命周期，未提 persister。",
+   "fix": "在 persistence.h 的 result_writer_close 注释写明约束：“必须在所有其他线程的 result_writer_append/flush 返回之后调用”；在 task_scheduler.h 构造注释补上“persister 生命周期须覆盖调度器，只能在 shutdown() 之后 close”（main.cpp 的现有顺序已满足）。不建议在 legacy C 模块内加引用计数；如需强保证，可在 C++ 侧加一层 RAII 包装而不改 C ABI。"
+  },
+  {
+   "id": "F2",
+   "severity": "Minor",
+   "category": "api",
+   "file": "src/config.cpp",
+   "line": 90,
+   "title": "validate() 未校验 worker_threads 上限 256，TaskScheduler 构造函数也不校验配置",
+   "detail": "config.h:5 契约写明 worker_threads 取值 1..256，但 validate() 只查了下限（<1）；loadFromFile 的 1..256 约束只在文件加载路径生效，以代码直接构造 SchedulerConfig{worker_threads=1000} 可绕过。另外 TaskScheduler 构造函数对 worker_threads<=0 不设防：=0 时静默创建“无工作线程”的调度器，任务提交后永远积压。",
+   "fix": "validate() 补上 worker_threads > 256 的检查；TaskScheduler 构造函数开头校验 config（worker_threads>=1、queue_capacity>=1），非法时抛 std::invalid_argument，或在头文件注明“调用前必须先 validate()”。"
+  },
+  {
+   "id": "F3",
+   "severity": "Minor",
+   "category": "concurrency",
+   "file": "src/task_scheduler.cpp",
+   "line": 99,
+   "title": "并发调用 shutdown() 时，第二个调用者立即返回，违背“阻塞直到排空”契约",
+   "detail": "shutdown() 见 stopping_ 已置位就 return，但此时第一个调用者可能还在 join。两个线程同时调用 shutdown() 时，后到者不等队列排空、不等线程退出就拿到返回，与头文件“阻塞直到队列排空、所有工作线程退出”的承诺不符（顺序重复调用没有问题，只有并发调用暴露此缺口）。",
+   "fix": "把“已请求停机”与“已完全停机”分成两个状态：排空完成后在锁内置位并用 cv 广播，shutdown() 末尾在锁内等待 drained 条件；或在头文件注明并发调用仅保证拒绝新任务、不保证等待。"
+  },
+  {
+   "id": "F4",
+   "severity": "Minor",
+   "category": "correctness",
+   "file": "src/task_scheduler.cpp",
+   "line": 84,
+   "title": "已取消任务出队前仍占用队列容量，可把队列“占满”导致新任务被拒",
+   "detail": "懒取消只把 ID 挪进 cancelledIds_，任务体留在堆里直到被工作线程弹出。若队列满且其中大量任务已被取消（工作线程又正忙），submit() 会因 heap_.size() >= queue_capacity 拒绝新任务（返回 0）；pendingCount() 也把这些僵尸条目计成“排队中”。",
+   "fix": "低成本做法：在头文件注明该语义；更彻底的做法是 cancel() 时在锁内于堆中查找并直接删除该元素（O(n)，量小可接受），或容量统计排除已取消任务。"
+  },
+  {
+   "id": "F5",
+   "severity": "Minor",
+   "category": "error-handling",
+   "file": "src/config.cpp",
+   "line": 80,
+   "title": "persistence_enabled 非法取值被静默当作 false，与其他键的告警策略不一致",
+   "detail": "布尔键按 value == \"1\"/\"true\"/\"yes\"/\"on\" 精确匹配，其余一律置 false 且无告警：写成 TRUE（大小写不同）或拼错成 ture 会静默关闭持久化，造成无日志可查；而数字键取值非法都会追加告警，同一层存在两种策略。",
+   "fix": "与其他键对齐：不匹配任何合法取值时向 *error 追加告警并保留默认值 true；或至少做大小写不敏感匹配。"
+  },
+  {
+   "id": "F6",
+   "severity": "Minor",
+   "category": "testing",
+   "file": "CMakeLists.txt",
+   "line": 24,
+   "title": "零测试覆盖：核心纯逻辑（堆序、懒取消、排空、配置解析）完全没有测试",
+   "detail": "全仓库没有任何测试目标或测试文件。TaskGreater 比较器、cancel/shutdown 语义、parseInteger/trim 都是无 IO 的纯逻辑，是最容易测、回归价值最高的部分；当前任何重构都只能靠 demo 程序肉眼验证。",
+   "fix": "引入轻量测试框架（doctest/Catch2 单头文件即可）或纯 assert 测试程序，覆盖：TaskGreater 严格弱序与堆序、submit/cancel/pendingCount 交互、shutdown 排空与幂等、config 解析与 validate 边界；用 enable_testing()/add_test 挂进 CTest。"
+  },
+  {
+   "id": "F7",
+   "severity": "Nit",
+   "category": "headers",
+   "file": "include/task_scheduler.h",
+   "line": 19,
+   "title": "公共头包含 <string>，但头文件本身不使用 std::string",
+   "detail": "task_scheduler.h 的声明里没有用到 std::string（detail 只在实现文件 runOne 中使用），该 include 属冗余，公共头多拖一个传递依赖。",
+   "fix": "删除第 19 行的 #include <string>。"
+  },
+  {
+   "id": "F8",
+   "severity": "Nit",
+   "category": "consistency",
+   "file": "src/main.cpp",
+   "line": 81,
+   "title": "ids 收集了全部任务 ID 但从未使用（死代码）",
+   "detail": "ids.push_back 存入 15 个提交返回值后从未读取；顺带错过了“提交成功”的校验机会——队列满时 submit 返回 0，demo 会静默丢任务。",
+   "fix": "删除 ids；或保留并做一次全量非 0 断言/计数，让提交失败可见。"
+  }
+ ]
+}</script>
+<script>
+(function(){
+"use strict";
+var DATA=JSON.parse(document.getElementById("review-data").textContent);
+var REV=DATA.review||{};
+var FINDINGS=DATA.findings||[];
+var SYSTEMIC=DATA.systemic||[];
+var ORDER={Blocker:0,Major:1,Minor:2,Nit:3};
+var VLABEL={accept:"采纳修复",reject:"驳回",discuss:"待讨论",custom:"自定义"};
+var COMMENT_PH="意见（可选）：补充上下文、为什么驳回、修复边界…";
+var CUSTOM_PH="自定义处理方式（必填）：写明你的决定或方案，agent 会按此执行…";
+var KEY="cppcr:"+(REV.repo||"")+":"+(REV.date||"")+":"+FINDINGS.length;
+var state={verdicts:{},comments:{}};
+try{
+  var saved=JSON.parse(localStorage.getItem(KEY)||"null");
+  if(saved&&saved.verdicts){state.verdicts=saved.verdicts;state.comments=saved.comments||{};}
+}catch(e){}
+
+function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
+function save(){try{localStorage.setItem(KEY,JSON.stringify(state));}catch(e){}}
+
+FINDINGS.sort(function(a,b){
+  var da=(ORDER[a.severity]!==undefined?ORDER[a.severity]:9);
+  var db=(ORDER[b.severity]!==undefined?ORDER[b.severity]:9);
+  if(da!==db)return da-db;
+  var d=String(a.file).localeCompare(String(b.file));
+  if(d)return d;
+  return (a.line||0)-(b.line||0);
+});
+
+document.title="C++ 代码审查报告 — "+(REV.repo||"");
+document.getElementById("meta").textContent=[REV.repo,REV.scope,REV.date].filter(Boolean).join(" · ");
+document.getElementById("summary").textContent=DATA.summary||"(无总体评估)";
+document.getElementById("genat").textContent="生成时间 "+(REV.generated_at||"")+" · 反馈导出文件名："+(REV.feedback_file||"code-review-report-feedback.json");
+
+var sevF="",stF="";
+var chips=document.getElementById("sevchips");
+function chip(label,val){
+  var b=document.createElement("button");
+  b.className="chip"+(val===""?" on":"");
+  b.textContent=label;
+  b.onclick=function(){
+    sevF=val;
+    chips.querySelectorAll(".chip").forEach(function(x){x.classList.remove("on");});
+    b.classList.add("on");
+    applyFilters();
+  };
+  chips.appendChild(b);
+}
+chip("全部","");
+var present=[];
+FINDINGS.forEach(function(f){if(present.indexOf(f.severity)<0)present.push(f.severity);});
+present.sort(function(a,b){return (ORDER[a]!==undefined?ORDER[a]:9)-(ORDER[b]!==undefined?ORDER[b]:9);});
+present.forEach(function(s){chip(s,s);});
+
+if(SYSTEMIC.length){
+  document.getElementById("systemic-sec").classList.remove("hidden");
+  document.getElementById("systemic").innerHTML=SYSTEMIC.map(function(p){
+    return '<div class="pattern"><b><span class="fid" data-copy="'+esc(p.id||"")+'" title="点击复制编号">'+esc(p.id||"")+"</span>"+esc(p.title)+(p.count?"（"+esc(p.count)+" 处）":"")+"</b>"
+      +(p.recommendation?"<div>"+esc(p.recommendation)+"</div>":"")
+      +((p.examples&&p.examples.length)?"<div class='ex'>示例："+esc(p.examples.join("、"))+"</div>":"")
+      +"</div>";
+  }).join("");
+}
+
+function cardHtml(f){
+  var v=state.verdicts[f.id]||"";
+  var btns=["accept","reject","discuss","custom"].map(function(k){
+    return '<button class="vbtn '+k+(v===k?" on":"")+'" data-v="'+k+'">'+VLABEL[k]+"</button>";
+  }).join("");
+  return '<div class="card s-'+f.severity.toLowerCase()+' v-'+(v||"none")+'" data-id="'+esc(f.id)+'" data-sev="'+esc(f.severity)+'">'
+    +'<div><span class="fid" data-copy="'+esc(f.id)+'" title="点击复制编号">'+esc(f.id)+"</span>"
+    +'<span class="sev '+f.severity.toLowerCase()+'">'+esc(f.severity)+"</span>"
+    +'<span class="loc">'+esc(f.file)+(f.line?":"+f.line:"")+(f.category?" · "+esc(f.category):"")+"</span></div>"
+    +"<h3>"+esc(f.title)+"</h3>"
+    +(f.detail?"<div class='why'>"+esc(f.detail)+"</div>":"")
+    +(f.fix?"<div class='fix'><b>建议修复：</b>"+esc(f.fix)+"</div>":"")
+    +'<div class="verdicts">'+btns+"</div>"
+    +'<textarea class="comment" placeholder="'+COMMENT_PH+'">'+esc(state.comments[f.id]||"")+"</textarea>"
+    +"</div>";
+}
+var fc=document.getElementById("findings");
+fc.innerHTML=FINDINGS.map(cardHtml).join("");
+document.getElementById("fcount").textContent=FINDINGS.length+" 项";
+
+fc.addEventListener("click",function(e){
+  var btn=e.target.closest?e.target.closest(".vbtn"):null;
+  if(!btn)return;
+  var card=btn.closest(".card");
+  var id=card.dataset.id,v=btn.dataset.v;
+  state.verdicts[id]=(state.verdicts[id]===v)?"":v;
+  card.querySelectorAll(".vbtn").forEach(function(b){b.classList.toggle("on",state.verdicts[id]===b.dataset.v);});
+  card.classList.remove("v-accept","v-reject","v-discuss","v-custom","v-none");
+  card.classList.add("v-"+(state.verdicts[id]||"none"));
+  var ta=card.querySelector(".comment");
+  if(ta)ta.placeholder=(state.verdicts[id]==="custom")?CUSTOM_PH:COMMENT_PH;
+  if(state.verdicts[id]==="custom"&&ta)ta.focus();
+  save();updateProg();applyFilters();
+});
+fc.addEventListener("input",function(e){
+  if(!e.target.classList||!e.target.classList.contains("comment"))return;
+  state.comments[e.target.closest(".card").dataset.id]=e.target.value;
+  save();
+});
+
+document.getElementById("stfilter").addEventListener("change",function(e){stF=e.target.value;applyFilters();});
+
+function effStatus(id){
+  var v=state.verdicts[id];
+  if(v)return v;
+  return (state.comments[id]||"").trim()?"discuss":"";
+}
+function updateProg(){
+  var decided=0;
+  FINDINGS.forEach(function(f){if(effStatus(f.id))decided++;});
+  document.getElementById("prog").textContent="已处理 "+decided+" / "+FINDINGS.length;
+}
+function applyFilters(){
+  updateProg();
+  document.querySelectorAll("#findings .card").forEach(function(card){
+    var id=card.dataset.id;
+    var okSev=(!sevF)||card.dataset.sev===sevF;
+    var eff=effStatus(id);
+    var okSt=(!stF)||(stF==="none"?!eff:eff===stF);
+    card.classList.toggle("hidden",!(okSev&&okSt));
+  });
+}
+
+function buildFeedback(){
+  var verdicts={};
+  FINDINGS.forEach(function(f){
+    var v=state.verdicts[f.id];
+    var c=state.comments[f.id]||"";
+    if(!v&&!c.trim())return;
+    verdicts[f.id]={verdict:v||"discuss",comment:c,severity:f.severity,
+                    file:f.file,line:f.line||null,title:f.title,fix:f.fix||""};
+  });
+  return {report:REV.report_name||"",findings_file:REV.findings_file||"",repo:REV.repo||"",
+          scope:REV.scope||"",exported_at:new Date().toISOString(),
+          total_findings:FINDINGS.length,decided:Object.keys(verdicts).length,verdicts:verdicts};
+}
+function feedbackText(){return JSON.stringify(buildFeedback(),null,2);}
+function showModal(t){
+  document.getElementById("modal-ta").value=t;
+  document.getElementById("modal").classList.remove("hidden");
+  document.getElementById("modal-ta").select();
+}
+function flash(msg){
+  var b=document.getElementById("btn-export"),old=b.textContent;
+  b.textContent=msg;
+  setTimeout(function(){b.textContent=old;},1400);
+}
+document.getElementById("btn-export").onclick=function(){
+  var name=REV.feedback_file||"code-review-report-feedback.json";
+  var blob=new Blob([feedbackText()],{type:"application/json"});
+  var a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);a.download=name;
+  document.body.appendChild(a);a.click();
+  setTimeout(function(){URL.revokeObjectURL(a.href);a.remove();},500);
+  flash("已导出 ✓");
+};
+document.getElementById("btn-copy").onclick=function(){
+  var t=feedbackText();
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(t).then(function(){flash("已复制 ✓");},function(){showModal(t);});
+  }else{showModal(t);}
+};
+document.getElementById("modal-close").onclick=function(){
+  document.getElementById("modal").classList.add("hidden");
+};
+
+function fallbackCopy(t){
+  var ta=document.createElement("textarea");
+  ta.value=t;ta.style.position="fixed";ta.style.opacity="0";
+  document.body.appendChild(ta);ta.select();
+  try{document.execCommand("copy");}catch(e){}
+  ta.remove();
+}
+function copyText(t,ok){
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(t).then(ok,function(){fallbackCopy(t);ok();});
+  }else{fallbackCopy(t);ok();}
+}
+document.addEventListener("click",function(e){
+  var b=e.target.closest?e.target.closest(".fid"):null;
+  if(!b||!b.dataset.copy)return;
+  copyText(b.dataset.copy,function(){
+    b.classList.add("copied");
+    setTimeout(function(){b.classList.remove("copied");},1200);
+  });
+});
+
+applyFilters();
+})();
+</script>
+</body>
+</html>

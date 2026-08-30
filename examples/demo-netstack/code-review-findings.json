@@ -1,0 +1,154 @@
+{
+  "review": {
+    "repo": "examples/demo-netstack",
+    "scope": "whole repo (demo)",
+    "coverage": "覆盖：全部 5 个源文件逐行精读、CMakeLists.txt、hotspots.py 全量扫描（188 LOC）；未覆盖：编译与运行时行为（demo 项目未配置构建）"
+  },
+  "summary": "demo 项目结构简单，但集中了大型 C++ 代码库的典型病灶。最需要关注的三件事：1) 网络模块有两处死锁路径（持锁回调、持锁重入加锁），且被 catch(...) 掩盖；2) 用 malloc 构造对象且多态基类无虚析构，属于未定义行为级别的所有权混乱；3) 命名风格三分天下（成员 _x/x_/裸名，函数 PascalCase/小写混用），正是大型项目腐化的起点。",
+  "systemic": [
+    {
+      "title": "C 残留散布在纯 C++ 路径",
+      "count": 10,
+      "examples": [
+        "src/db/row.cpp:14 (malloc+C强转)",
+        "src/db/row.cpp:15 (NULL)",
+        "src/db/row.cpp:16 (printf)",
+        "src/util/legacy.cpp:32 (sprintf)",
+        "src/util/legacy.cpp:13 (unscoped enum)"
+      ],
+      "recommendation": "统一 nullptr 替换 NULL、static_cast 替换 C 强转、日志库替换 printf/sprintf、malloc 对象改 RAII；每类问题一次 PR 收敛一类，不要逐行零敲。"
+    },
+    {
+      "title": "命名风格三分天下（先测量后判定）",
+      "count": 4,
+      "examples": [
+        "src/util/legacy.cpp:24 (_count 前下划线)",
+        "src/util/legacy.cpp:25 (items 裸名)",
+        "src/util/legacy.cpp:21 (ComputeTotal 大驼峰)"
+      ],
+      "recommendation": "hotspots.py 实测：成员变量 trailing underscore x_ 占 20 处为绝对主导（_x 仅 3 处、裸名 1 处），函数小写命名占 8 处为主导（PascalCase 3 处中 2 处是构造/析构属正常，真正偏离只有 ComputeTotal）。建议：成员统一 x_，函数统一 snake_case，按上面 4 处偏离逐一收敛；规则写入 .clang-tidy (readability-identifier-naming) 防回潮。"
+    }
+  ],
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "Blocker",
+      "category": "concurrency",
+      "file": "src/net/pool.cpp",
+      "line": 29,
+      "title": "在持有 mtx_ 锁的状态下调用用户回调",
+      "detail": "on_message 持有 lock_guard 时执行用户注册的 MessageSink 回调。回调若再进入 Pool 的任何加锁接口（如 release()、acquire()），或回调内部做耗时 IO，都会造成死锁或全池阻塞。回调代码不受本模块控制，这是并发设计中最危险的信任假设。",
+      "fix": "先在锁内拷贝回调指针与数据，退出 lock_guard 作用域后再调用回调；或改为投递到任务队列异步执行。"
+    },
+    {
+      "id": "F2",
+      "severity": "Blocker",
+      "category": "concurrency",
+      "file": "src/net/pool.cpp",
+      "line": 36,
+      "title": "drain() 持锁后调用 release() 再次加锁，自死锁",
+      "detail": "drain() 先持有 mtx_（第 34 行 lock_guard），循环内调用 release()，而 release() 内部再次对同一个非递归 mutex 加锁 —— 标准库规定这是未定义行为，实测必然死锁。外层 catch(...) 把异常吞掉也掩盖不了挂死的事实。",
+      "fix": "drain() 内直接操作 items_（clear() 或逐个 pop），不要绕道 release()；同时给 catch(...) 加日志，禁止静默吞异常。"
+    },
+    {
+      "id": "F3",
+      "severity": "Major",
+      "category": "ownership",
+      "file": "src/db/row.cpp",
+      "line": 14,
+      "title": "malloc 出来的内存直接当 Record 对象使用",
+      "detail": "malloc(sizeof(Record)) 只分配裸内存，Record 的构造函数不会执行，成员处于未初始化状态；且此处用 free 释放、项目其它处用 delete，两套释放体系混用，跨类型释放是未定义行为。",
+      "fix": "改用 new/delete 或更好：工厂函数返回 std::unique_ptr<Record>，把所有权写在类型上。"
+    },
+    {
+      "id": "F4",
+      "severity": "Major",
+      "category": "api",
+      "file": "include/db/row.h",
+      "line": 14,
+      "title": "多态基类 Record 的析构函数不是 virtual",
+      "detail": "Record 有 virtual 成员函数（width），但析构函数 ~Record() 是非虚的。任何通过 Record* 指向派生对象并 delete 的代码都是未定义行为——派生类析构不会执行。同文件的 Row 是正确示范（virtual ~Row()）。",
+      "fix": "改为 virtual ~Record() = default; 或 protected 非虚析构（禁止通过基类指针删除时）。"
+    },
+    {
+      "id": "F5",
+      "severity": "Major",
+      "category": "build",
+      "file": "CMakeLists.txt",
+      "line": 6,
+      "title": "全局 include_directories / add_definitions 污染所有 target",
+      "detail": "include_directories() 和 add_definitions() 是目录级全局设置，目录下所有 target（含未来的测试、工具）都被动继承 spdlog 的头文件路径和宏。大型项目里这会让依赖关系变成隐式的：谁真正用了 spdlog 无法从 target 定义看出来，删库时会遍地编译错误。",
+      "fix": "改为 target_include_directories(... PRIVATE include) + target_compile_definitions(...) 挂在具体 target 上；spdlog 若作为依赖应 find_package/add_subdirectory 后 target_link_libraries。"
+    },
+    {
+      "id": "F6",
+      "severity": "Minor",
+      "category": "consistency",
+      "file": "src/db/row.cpp",
+      "line": 27,
+      "title": "void* 泛型接口 + C 风格强转绕过类型系统",
+      "detail": "find_slot(void** slots, int n) 用 void* 数组做泛型查找，边界处 ((char*)slots[i]) 强转拿到第一个字节判断——类型信息全丢，强转错了编译器不会报错。同文件 make_record 里也有 (Record*)malloc 的 C 强转。pool.h 的 MessageSink 用 void* ctx 传参属于同一家族。",
+      "fix": "内部纯 C++ 路径改用模板或基于基类接口（如 Row::width）分发；与 C ABI 互操作的边界（若存在）保留 void* 但集中隔离并注释。强转统一换 static_cast/reinterpret_cast 以便 grep。"
+    },
+    {
+      "id": "F7",
+      "severity": "Minor",
+      "category": "consistency",
+      "file": "include/net/pool.h",
+      "line": 2,
+      "title": "头文件三连：#ifdef guard + include 未排序 + using namespace std",
+      "detail": "pool.h 用 #ifndef POOL_H 而项目另一头文件 row.h 用 #pragma once，guard 风格不统一；include 组内乱序（zlib.h 排在 mutex 前面）；第 10 行 using namespace std; 会污染所有包含此头的翻译单元——三个问题都在大项目中随包含关系指数级放大。",
+      "fix": "统一 #pragma once（guard 宏在大项目中会撞车）；include 组内按字典序重排；using namespace 移出头文件（.cpp 里也建议不用）。"
+    },
+    {
+      "id": "F8",
+      "severity": "Minor",
+      "category": "consistency",
+      "file": "src/util/legacy.cpp",
+      "line": 24,
+      "title": "成员变量命名三种风格混用（_count / total_ / items）",
+      "detail": "同一个 Cache 类里 _count（前下划线）、total_（后下划线）、items（裸名）三种风格并存。构造器里 this->items_ 与裸名混用时的遮蔽 bug 正是这种混乱的典型产物。实测全项目主导风格是后下划线 x_（20 处 vs 3 处）。",
+      "fix": "全项目统一为 x_ 风格（跟随主导），配置 readability-identifier-naming 让 clang-tidy 守住；items 改名 items_ 并补初始化。"
+    },
+    {
+      "id": "F9",
+      "severity": "Minor",
+      "category": "consistency",
+      "file": "src/util/legacy.cpp",
+      "line": 21,
+      "title": "函数命名混用：ComputeTotal（大驼峰）vs lookup_key（snake_case）",
+      "detail": "同一类中 ComputeTotal 用大驼峰、lookup_key 用小写下划线。实测项目函数以小写命名为主导（8 处），PascalCase 的 3 处中 2 处是构造/析构函数（正常），真正偏离只有 ComputeTotal 一处。",
+      "fix": "ComputeTotal 改名 compute_total；在 .clang-tidy 里固化 snake_case 规则。"
+    },
+    {
+      "id": "F10",
+      "severity": "Minor",
+      "category": "consistency",
+      "file": "src/util/legacy.cpp",
+      "line": 8,
+      "title": "typedef struct 是 C 兼容写法，C++ 代码不需要",
+      "detail": "typedef struct Point {...} Point; 是为了让 C 编译器省略 struct 关键字的遗留写法。C++ 中 struct 名本身就是类型名，这个 typedef 毫无作用，还让 grep 'struct Point' 多一次命中。pool.h 里函数指针的 typedef 同理，建议 using MessageSink = void(*)(void*);。",
+      "fix": "删除 typedef，直接 struct Point {...}；函数指针类型改 using 别名。"
+    },
+    {
+      "id": "F11",
+      "severity": "Minor",
+      "category": "consistency",
+      "file": "src/net/pool.cpp",
+      "line": 9,
+      "title": "构造函数体内赋值 + 冗余初始化",
+      "detail": "Pool::Pool() 里 this->items_ = vector<void*>(); —— items_ 本来就会被默认构造，这一行是纯冗余赋值；若成员未来变为 const/引用类型，函数体赋值直接编译不过。全项目应统一用成员初始化列表（或 NSDMI 类内初始化）。",
+      "fix": "删除该行，或改为 : items_() ; 成员声明处直接 vector<void*> items_; 即可，连初始化列表都不用写。"
+    },
+    {
+      "id": "F12",
+      "severity": "Nit",
+      "category": "consistency",
+      "file": "src/util/legacy.cpp",
+      "line": 30,
+      "title": "冗余初始化 std::string name = std::string(\"cache\")",
+      "detail": "等号右侧的 std::string(\"cache\") 已经是 string，外面再套一层拷贝是多余动作（编译器多半会优化掉，但读代码的人会愣一下）。同一函数里 sprintf 到 char buf 也是 C 残留（已并入系统性模式）。",
+      "fix": "std::string name = \"cache\"; 即可。"
+    }
+  ]
+}

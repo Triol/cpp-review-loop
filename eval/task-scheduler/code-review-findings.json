@@ -1,0 +1,103 @@
+{
+  "review": {
+    "repo": "F:/workspace/claude_playground/skill/c++program/skill-eval/task-scheduler",
+    "scope": "whole repo",
+    "coverage": "覆盖：全量深读全部 8 个 C++ 文件（918 行，include/ 4 个头文件 + src/ 4 个实现）与 2 个 CMakeLists 构建文件；运行 hotspots.py 做热点与一致性测量（命名、头文件卫生、红旗模式均逐一开上下文核实）；未覆盖：未执行编译与运行（未验证运行时行为与 Windows/POSIX 分支的实际差异）、无 git 历史故无 churn 分析、静态分析器：本机有 clang-tidy（LLVM 20.1.2）但无法解析标准库头（工具链 include 路径缺失，按规范不为审查搭工具链，已跳过；cppcheck 未安装），以下结论均来自人工阅读。"
+  },
+  "summary": "全量审查了仓库全部 8 个 C++ 文件（918 行）与 2 个 CMake 构建文件。整体健康度高：TaskScheduler 的并发设计正确（任务在锁外执行、构造函数异常安全、优先级比较器与懒取消语义经逐行核对无误），legacy C 持久化模块边界有清晰的文档化约定，命名与头文件风格高度统一，未发现 Blocker。最需要关注的三件事：一、persistence 的 result_writer_close 与并发 append 存在 use-after-free 且句柄生命周期契约未文档化（唯一 Major）；二、配置校验有缺口（validate() 缺 worker_threads 上限检查、构造函数不校验 config）；三、项目零测试覆盖，核心纯逻辑（堆序、取消、排空、配置解析）极易测却无测试。",
+  "systemic": [
+    {
+      "id": "S1",
+      "title": "对外边界的取值校验与生命周期契约缺口",
+      "count": 3,
+      "examples": [
+        "src/config.cpp:90",
+        "include/task_scheduler.h:48",
+        "include/persistence.h:51"
+      ],
+      "recommendation": "统一边界约定：(1) validate() 必须覆盖头文件声明的全部取值范围，TaskScheduler 构造函数对 config 再做一次断言；(2) 所有跨模块句柄（Metrics&、result_writer_t*）在头文件注释中写明生命周期与关闭时序（谁须比谁活得久、close 前须静默）。两处都是纯文档加几行校验的低成本修复。"
+    }
+  ],
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "Major",
+      "category": "concurrency",
+      "file": "src/persistence.cpp",
+      "line": 203,
+      "title": "result_writer_close 与并发 append/flush 存在 use-after-free，且句柄生命周期契约未文档化",
+      "detail": "close() 在释放内部锁之后才 delete 对象（194–203 行）：若另一线程正阻塞在 append() 的 w->mtx 上（或尚在进入临界区之前），随后锁到的是已析构的 mutex 并访问已释放内存，属 UB。persistence.h 只写了“调用后句柄不可再用”，没有任何一处说明 close 必须等所有在途 append/flush 返回；task_scheduler.h:48 的构造注释也只约定了 metrics 的生命周期，未提 persister。",
+      "fix": "在 persistence.h 的 result_writer_close 注释写明约束：“必须在所有其他线程的 result_writer_append/flush 返回之后调用”；在 task_scheduler.h 构造注释补上“persister 生命周期须覆盖调度器，只能在 shutdown() 之后 close”（main.cpp 的现有顺序已满足）。不建议在 legacy C 模块内加引用计数；如需强保证，可在 C++ 侧加一层 RAII 包装而不改 C ABI。"
+    },
+    {
+      "id": "F2",
+      "severity": "Minor",
+      "category": "api",
+      "file": "src/config.cpp",
+      "line": 90,
+      "title": "validate() 未校验 worker_threads 上限 256，TaskScheduler 构造函数也不校验配置",
+      "detail": "config.h:5 契约写明 worker_threads 取值 1..256，但 validate() 只查了下限（<1）；loadFromFile 的 1..256 约束只在文件加载路径生效，以代码直接构造 SchedulerConfig{worker_threads=1000} 可绕过。另外 TaskScheduler 构造函数对 worker_threads<=0 不设防：=0 时静默创建“无工作线程”的调度器，任务提交后永远积压。",
+      "fix": "validate() 补上 worker_threads > 256 的检查；TaskScheduler 构造函数开头校验 config（worker_threads>=1、queue_capacity>=1），非法时抛 std::invalid_argument，或在头文件注明“调用前必须先 validate()”。"
+    },
+    {
+      "id": "F3",
+      "severity": "Minor",
+      "category": "concurrency",
+      "file": "src/task_scheduler.cpp",
+      "line": 99,
+      "title": "并发调用 shutdown() 时，第二个调用者立即返回，违背“阻塞直到排空”契约",
+      "detail": "shutdown() 见 stopping_ 已置位就 return，但此时第一个调用者可能还在 join。两个线程同时调用 shutdown() 时，后到者不等队列排空、不等线程退出就拿到返回，与头文件“阻塞直到队列排空、所有工作线程退出”的承诺不符（顺序重复调用没有问题，只有并发调用暴露此缺口）。",
+      "fix": "把“已请求停机”与“已完全停机”分成两个状态：排空完成后在锁内置位并用 cv 广播，shutdown() 末尾在锁内等待 drained 条件；或在头文件注明并发调用仅保证拒绝新任务、不保证等待。"
+    },
+    {
+      "id": "F4",
+      "severity": "Minor",
+      "category": "correctness",
+      "file": "src/task_scheduler.cpp",
+      "line": 84,
+      "title": "已取消任务出队前仍占用队列容量，可把队列“占满”导致新任务被拒",
+      "detail": "懒取消只把 ID 挪进 cancelledIds_，任务体留在堆里直到被工作线程弹出。若队列满且其中大量任务已被取消（工作线程又正忙），submit() 会因 heap_.size() >= queue_capacity 拒绝新任务（返回 0）；pendingCount() 也把这些僵尸条目计成“排队中”。",
+      "fix": "低成本做法：在头文件注明该语义；更彻底的做法是 cancel() 时在锁内于堆中查找并直接删除该元素（O(n)，量小可接受），或容量统计排除已取消任务。"
+    },
+    {
+      "id": "F5",
+      "severity": "Minor",
+      "category": "error-handling",
+      "file": "src/config.cpp",
+      "line": 80,
+      "title": "persistence_enabled 非法取值被静默当作 false，与其他键的告警策略不一致",
+      "detail": "布尔键按 value == \"1\"/\"true\"/\"yes\"/\"on\" 精确匹配，其余一律置 false 且无告警：写成 TRUE（大小写不同）或拼错成 ture 会静默关闭持久化，造成无日志可查；而数字键取值非法都会追加告警，同一层存在两种策略。",
+      "fix": "与其他键对齐：不匹配任何合法取值时向 *error 追加告警并保留默认值 true；或至少做大小写不敏感匹配。"
+    },
+    {
+      "id": "F6",
+      "severity": "Minor",
+      "category": "testing",
+      "file": "CMakeLists.txt",
+      "line": 24,
+      "title": "零测试覆盖：核心纯逻辑（堆序、懒取消、排空、配置解析）完全没有测试",
+      "detail": "全仓库没有任何测试目标或测试文件。TaskGreater 比较器、cancel/shutdown 语义、parseInteger/trim 都是无 IO 的纯逻辑，是最容易测、回归价值最高的部分；当前任何重构都只能靠 demo 程序肉眼验证。",
+      "fix": "引入轻量测试框架（doctest/Catch2 单头文件即可）或纯 assert 测试程序，覆盖：TaskGreater 严格弱序与堆序、submit/cancel/pendingCount 交互、shutdown 排空与幂等、config 解析与 validate 边界；用 enable_testing()/add_test 挂进 CTest。"
+    },
+    {
+      "id": "F7",
+      "severity": "Nit",
+      "category": "headers",
+      "file": "include/task_scheduler.h",
+      "line": 19,
+      "title": "公共头包含 <string>，但头文件本身不使用 std::string",
+      "detail": "task_scheduler.h 的声明里没有用到 std::string（detail 只在实现文件 runOne 中使用），该 include 属冗余，公共头多拖一个传递依赖。",
+      "fix": "删除第 19 行的 #include <string>。"
+    },
+    {
+      "id": "F8",
+      "severity": "Nit",
+      "category": "consistency",
+      "file": "src/main.cpp",
+      "line": 81,
+      "title": "ids 收集了全部任务 ID 但从未使用（死代码）",
+      "detail": "ids.push_back 存入 15 个提交返回值后从未读取；顺带错过了“提交成功”的校验机会——队列满时 submit 返回 0，demo 会静默丢任务。",
+      "fix": "删除 ids；或保留并做一次全量非 0 断言/计数，让提交失败可见。"
+    }
+  ]
+}

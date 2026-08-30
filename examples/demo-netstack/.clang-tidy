@@ -1,0 +1,9 @@
+# 函数/方法统一大驼峰，成员统一后下划线（项目规范）
+Checks: '-*,readability-identifier-naming'
+CheckOptions:
+  - key: readability-identifier-naming.FunctionCase
+    value: CamelCase
+  - key: readability-identifier-naming.MethodCase
+    value: CamelCase
+  - key: readability-identifier-naming.MemberSuffix
+    value: '_'

@@ -135,6 +135,7 @@ _GLIBCXX_ASSERTIONS、/sdl、/guard:cf）、sanitizer、§7 全局旗标反模�
 | 头文件拆分信号（用户要求追加） | 新增 *Header composition*（每头文件的列首 class/struct 定义计数）：夹具 5 类全识别、前置声明 `class Beta;` 正确排除、模板类与换行大括号形态均识别；task-scheduler 实测 3 个双类头（如 metrics.h 的 MetricsSnapshot+Metrics）——全部是"主类+配套辅助结构"的合法形态，恰好演示"候选不裁决、相关性人工判断"的设计 |
 | 封装绕过一致性（§M，用户要求追加） | 新增 *Wrapper-bypass candidates*：按设施测量时间/随机数来源多样性、CRC 同名实现数。task-scheduler 实测：时间获取 3 种来源并存（time()/std::time、system_clock、steady_clock），并附"墙钟 vs 单调钟用途不同、分用途后再判"提示——本项目墙钟记日志、单调钟测耗时属合法分工，恰好演示"候选不裁决"；rand/crc 单一来源未误报。修复轮同步加入"diff 不得引入不必要依赖（新 #include / 链接库 / 第三方测试框架）"检查点条款 |
 | 第三方时间源覆盖（用户追问） | brpc 的 `butil::gettimeofday_us()`、SPDK 的 `spdk_get_ticks()`、`clock_gettime`、`QueryPerformanceCounter` 等第三方/OS 时间源扩充进 *Wrapper-bypass candidates*。夹具实测：gettimeofday*(2) + spdk_get_ticks(2) + time()/std::time(1) 识别为 3 种来源并存；eval 项目回归结果不变。`WRAPPER_TIME_RES` 为纯数据表，项目特有的封装面一行即可追加 |
+| 魔数检查 + 每批修复后复扫（用户要求追加） | 新增 *Magic-number candidates*：统计常量定义行（#define/const/constexpr/enum）之外的两位数以上字面量（字符串/注释已剥离、十六进制与小数排除）。夹具实测：42 / 86400 / 512 计入 3 个候选，具名常量定义与枚举值正确排除；eval 项目实测 30 个候选/7 文件（缓冲区大小类留待人工判断）。SKILL.md §7 同步升级：修复前快照 hotspots 基线 → 每批检查点复扫被改文件对比基线（新引入的魔数/裸 new/新时间源当场归入本批解决）→ 收尾复审前全项目复扫对比 |
 
 checklist.md §7 的 "Warnings" 条目同步扩为 "Warnings & warnings-as-errors" 与
 "Robustness compile options absent" 两条。

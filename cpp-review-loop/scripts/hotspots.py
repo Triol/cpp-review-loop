@@ -153,6 +153,12 @@ WRAPPER_RAND_RES = [
 ]
 CRC_CALL_RE = re.compile(r"\b([A-Za-z_]\w*[Cc][Rr][Cc]\w*)\s*\(")
 
+# Magic numbers (checklist.md §1): two-plus-digit literals outside
+# constant-definition lines. Strings/comments already stripped; hex, decimals
+# and single-digit sentinels are not counted.
+MAGIC_NUM_RE = re.compile(r"(?<![\w.\"'])(?<!0[xX])[0-9]{2,}(?![\w.])")
+CONST_DECL_RE = re.compile(r"^\s*(?:#\s*define\b|enum\b|(?:static\s+)?(?:constexpr\s+)?const\b|constexpr\b)")
+
 # Build-file hardening signals (checklist.md §7) — measured on build files.
 BUILD_FILE_SUFFIXES = (".cmake", ".vcxproj", ".mk")
 BUILD_FILE_NAMES = {"cmakelists.txt", "makefile", "meson.build", "build.bazel",
@@ -533,6 +539,26 @@ def wrapper_bypass_scan(s_lines):
     return time_c, rand_c, crc_c
 
 
+def magic_number_scan(s_lines):
+    """Unnamed 2+-digit literals outside constant definitions (checklist §1).
+
+    Returns (total_count, [(line_no, snippet), ...]) — samples capped by the
+    caller. Candidate counts only: unit/contract judgment is human work.
+    """
+    total = 0
+    samples = []
+    for idx, line in enumerate(s_lines, 1):
+        ls = line.strip()
+        if not ls or ls.startswith("#") or CONST_DECL_RE.match(ls):
+            continue
+        found = MAGIC_NUM_RE.findall(line)
+        if found:
+            total += len(found)
+            if len(samples) < 3:
+                samples.append((idx, ls[:100]))
+    return total, samples
+
+
 def collect_files(root, include_all):
     root = Path(root).resolve()
     files = []
@@ -604,6 +630,7 @@ def main():
     member_samples = {label: [] for label, _ in MEMBER_RULES}
     log_sep_totals, log_style_totals, log_key_totals = Counter(), Counter(), Counter()
     wrapper_totals = {"time": Counter(), "rand": Counter(), "crc": Counter()}
+    magic_files = []  # (count, rel, samples) for files with magic literals
 
     for path in files:
         try:
@@ -677,6 +704,10 @@ def main():
         wrapper_totals["rand"].update(w_rand)
         wrapper_totals["crc"].update(w_crc)
 
+        m_total, m_samples = magic_number_scan(s_lines)
+        if m_total:
+            magic_files.append((m_total, rel, m_samples))
+
         for line_no, snippet in printf_spec_scan(raw_lines):
             agg = flag_totals.setdefault(
                 "printf: size_t arg w/o %z (verify -Wformat)",
@@ -749,6 +780,7 @@ def main():
     churn_risk = churn_risk[:args.top]
 
     header_multi.sort(key=lambda t: (-t[0], t[1]))
+    magic_files.sort(key=lambda t: (-t[0], t[1]))
 
     report = {
         "root": str(root),
@@ -798,6 +830,12 @@ def main():
         },
         "wrapper_bypass": {key: dict(counter)
                            for key, counter in wrapper_totals.items()},
+        "magic_numbers": {
+            "total": sum(n for n, _rel, _s in magic_files),
+            "files": [[rel, n] for n, rel, _s in magic_files[:10]],
+            "samples": [f"{rel}:{idx}  {s}" for _n, rel, ss in magic_files[:4]
+                        for idx, s in ss],
+        },
     }
 
     if args.as_json:
@@ -877,6 +915,18 @@ def main():
                    "先 grep 封装名定位封装层)")
     else:
         out.append("(各设施来源单一，未见绕过候选)")
+
+    out.append("\n-- Magic-number candidates (unnamed 2+ digit literals; judge units/contracts) --")
+    if magic_files:
+        out.append(f"{sum(n for n, _r, _s in magic_files):>5}  literals in "
+                   f"{len(magic_files)} files (constant-definition lines excluded)")
+        for n, rel, samples in magic_files[:5]:
+            out.append(f"{n:>5}  {rel}")
+            for idx, s in samples[:1]:
+                out.append(f"            e.g. {rel}:{idx}  {s}")
+        out.append("        (0/1/-1、枚举值、具名常量定义行已排除；单位/契约不明即候选)")
+    else:
+        out.append("(no magic-number candidates)")
 
     out.append("\n-- Function naming style (heuristic; ctors/dtors counted) --")
     if report["function_naming"]["distribution"]:

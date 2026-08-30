@@ -24,6 +24,7 @@ At the end: the "what NOT to flag" list (anti-noise) and the severity rubric.
 - **`using namespace ...` in headers** (`grep -n "using namespace" **/*.h`) — pollutes every includer's namespace at scale; never acceptable in a header.
 - **Include order, placement, and guards** — project-uniformity checks (sorting within groups, code before includes, `#pragma once` vs `#ifdef` guards) live in references/consistency.md §B; flag deviations from the project's own convention, not from your taste.
 - **Log/output format uniformity** — `key=value` vs `key: value` styles, field renames across iterations, struct fields placed after free-text fields, status-value set drift: measure-then-flag per references/consistency.md §L (scanner signal: *Log field style signals*).
+- **Standard-library wrapper bypass** — when the project wraps a facility (time / rand / CRC / logging), scattered direct std/OS calls defeat the testability seam and drift apart; measure-then-flag per references/consistency.md §M (scanner signal: *Wrapper-bypass candidates*).
 - **Headers that include what they could forward-declare** — include-what-you-use violations in the *public* surface. Compiles-slow is a real large-scale cost.
 - **Polymorphic base with non-virtual destructor** — class has `virtual` functions but no `virtual ~Base()`; delete via base pointer is UB. High-severity, verify inheritance actually happens.
 - **Missing `explicit` on single-argument constructors** — silent implicit conversions.

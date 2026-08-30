@@ -4,6 +4,29 @@
 
 > An agent skill in the open `SKILL.md` format for reviewing **large-scale C++** codebases, then driving the fix round from per-finding user feedback. Works with any agent that loads skills.
 
+## 引言
+
+大型 C++ 项目动辄百万行、多团队长期演进，代码审查在这里面临三重困境：人工读不过来；
+通用扫描工具产出海量未核实的误报——而**误报比漏报更快摧毁信任**；审查报告写完即
+"归档"，发现的问题有没有修、修得对不对，无人闭环。
+
+cpp-review-loop 的目标，是把审查从"交付一份报告"变成"运行一个收敛过程"。它的设计
+逻辑由四条主线构成：
+
+1. **先测量，后判断** —— `hotspots.py` 先用客观数据建立全项目热点图，再按热点抽样
+   深读；一致性条目先测量项目主导风格、只报少数派偏离，绝不把审查者的个人口味当标准。
+2. **候选 ≠ 发现** —— 任何模式命中都必须打开上下文核实后才允许进报告；系统性模式
+   （"34 处裸 `new` 分布在 9 个模块"）优先于逐行 nit。
+3. **审查的产出是交互，不是文档** —— 报告是可交互 HTML，用户对每条发现表态
+   （采纳 / 驳回 / 待讨论 / 自定义意见即决策），导出的反馈 JSON 直接驱动修复轮。
+4. **修复不靠信任，靠闭环** —— 深读按"维度 × 文件批"派发给聚焦 subagent、主 agent
+   逐批检查点；行为类修复走 TDD-LOOP（复现单测先红后绿）；修完由不知情的复审
+   subagent 兜底，新问题回炉。三圈相扣，质量只朝一个方向收敛。
+
+跨 agent 与完全离线是两条工程底线：任何能加载 `SKILL.md` 并运行 Python 脚本的工具
+都能完整使用它；断网机器上报告依旧可渲染、可交互、可导出。所有设计都经过双盲实验
+校准——查准 8/8、误报 0 的完整实测见 [docs/VALIDATION.md](docs/VALIDATION.md)。
+
 ![交互式审查报告](docs/img/report-screenshot.png)
 
 ## 为什么叫 loop

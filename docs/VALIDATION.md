@@ -133,6 +133,7 @@ _GLIBCXX_ASSERTIONS、/sdl、/guard:cf）、sanitizer、§7 全局旗标反模�
 | 语义约束 | "未检测到"只是建议（按工具链判断、vendored 目录可豁免），输出与文档均标注 candidates |
 | 运行时代价告知（用户要求） | 检测到有运行时代价的旗标时只对用户告警、不提出"删除修复"，去留由用户决定；扫描输出按类别内联标注代价：sanitizers（ASan ≈2x CPU / 2-3x 内存，仅限 dev/CI，绝不上 release）、hardening（~0-3%，通常可忽略）、warnings/-Werror 类（纯编译期零运行时代价，无需警告）。夹具实测各类别标注均正确输出 |
 | 头文件拆分信号（用户要求追加） | 新增 *Header composition*（每头文件的列首 class/struct 定义计数）：夹具 5 类全识别、前置声明 `class Beta;` 正确排除、模板类与换行大括号形态均识别；task-scheduler 实测 3 个双类头（如 metrics.h 的 MetricsSnapshot+Metrics）——全部是"主类+配套辅助结构"的合法形态，恰好演示"候选不裁决、相关性人工判断"的设计 |
+| 封装绕过一致性（§M，用户要求追加） | 新增 *Wrapper-bypass candidates*：按设施测量时间/随机数来源多样性、CRC 同名实现数。task-scheduler 实测：时间获取 3 种来源并存（time()/std::time、system_clock、steady_clock），并附"墙钟 vs 单调钟用途不同、分用途后再判"提示——本项目墙钟记日志、单调钟测耗时属合法分工，恰好演示"候选不裁决"；rand/crc 单一来源未误报。修复轮同步加入"diff 不得引入不必要依赖（新 #include / 链接库 / 第三方测试框架）"检查点条款 |
 
 checklist.md §7 的 "Warnings" 条目同步扩为 "Warnings & warnings-as-errors" 与
 "Robustness compile options absent" 两条。

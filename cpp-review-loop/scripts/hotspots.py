@@ -35,6 +35,10 @@ Interpretation rules (do not skip):
     (forward declarations excluded); multiple classes in one header is a
     CANDIDATE — co-located helper types serving the primary class are fine,
     relatedness is a human call (checklist.md §1).
+  * Wrapper-bypass counts distinct sources per facility (time / rand / crc)
+    as RAW candidates: wall-clock vs monotonic clocks serve different
+    purposes — split by usage, then find the project's wrapper layer before
+    calling anything a bypass (consistency.md §M).
 """
 
 import argparse
@@ -123,6 +127,25 @@ HEADER_CLASS_RE = re.compile(
     r"^(?:template\s*<[^<>]*>\s*)?(?:class|struct)\s+([A-Z_]\w*)[^;{}]*\{")
 HEADER_CLASS_NEXT_LINE_RE = re.compile(
     r"^(?:template\s*<[^<>]*>\s*)?(?:class|struct)\s+([A-Z_]\w*)[^;{}]*$")
+
+# Wrapper-bypass candidates (consistency.md §M): multiple distinct sources for
+# the same facility (time / randomness) or multiple same-purpose implementations
+# (crc). Raw counts only — usage-level judgment is human work.
+WRAPPER_TIME_RES = [
+    ("time()/std::time", re.compile(r"(?<!::)\btime\s*\(\s*(?:NULL|nullptr|0)\s*\)|\bstd::time\s*\(")),
+    ("chrono::system_clock", re.compile(r"\bchrono::system_clock\b")),
+    ("chrono::steady_clock", re.compile(r"\bchrono::steady_clock\b")),
+    ("GetTickCount*", re.compile(r"\bGetTickCount(?:64)?\b")),
+    ("GetSystemTime/LocalTime", re.compile(r"\bGet(?:System|Local)Time\b")),
+    ("clock()", re.compile(r"\bclock\s*\(\s*\)")),
+]
+WRAPPER_RAND_RES = [
+    ("rand()/srand()", re.compile(r"\b(?:srand|rand)\s*\(")),
+    ("rand_r", re.compile(r"\brand_r\s*\(")),
+    ("std::mt19937 family", re.compile(r"\bstd::(?:mt19937(?:_64)?|default_random_engine)\b")),
+    ("std::random_device", re.compile(r"\bstd::random_device\b")),
+]
+CRC_CALL_RE = re.compile(r"\b([A-Za-z_]\w*[Cc][Rr][Cc]\w*)\s*\(")
 
 # Build-file hardening signals (checklist.md §7) — measured on build files.
 BUILD_FILE_SUFFIXES = (".cmake", ".vcxproj", ".mk")
@@ -482,6 +505,28 @@ def header_class_scan(s_lines):
     return names
 
 
+def wrapper_bypass_scan(s_lines):
+    """Distinct sources per wrapped facility (consistency.md §M).
+
+    Returns (time_counter, rand_counter, crc_counter). Raw candidate counts:
+    wall-clock vs monotonic clocks serve different purposes, so usage-level
+    judgment stays with the reviewer.
+    """
+    time_c, rand_c, crc_c = Counter(), Counter(), Counter()
+    for line in s_lines:
+        for name, rx in WRAPPER_TIME_RES:
+            n = len(rx.findall(line))
+            if n:
+                time_c[name] += n
+        for name, rx in WRAPPER_RAND_RES:
+            n = len(rx.findall(line))
+            if n:
+                rand_c[name] += n
+        for m in CRC_CALL_RE.finditer(line):
+            crc_c[m.group(1)] += 1
+    return time_c, rand_c, crc_c
+
+
 def collect_files(root, include_all):
     root = Path(root).resolve()
     files = []
@@ -552,6 +597,7 @@ def main():
     member_totals = {label: 0 for label, _ in MEMBER_RULES}
     member_samples = {label: [] for label, _ in MEMBER_RULES}
     log_sep_totals, log_style_totals, log_key_totals = Counter(), Counter(), Counter()
+    wrapper_totals = {"time": Counter(), "rand": Counter(), "crc": Counter()}
 
     for path in files:
         try:
@@ -619,6 +665,11 @@ def main():
         log_sep_totals.update(file_seps)
         log_style_totals.update(file_styles)
         log_key_totals.update(file_keys)
+
+        w_time, w_rand, w_crc = wrapper_bypass_scan(s_lines)
+        wrapper_totals["time"].update(w_time)
+        wrapper_totals["rand"].update(w_rand)
+        wrapper_totals["crc"].update(w_crc)
 
         for line_no, snippet in printf_spec_scan(raw_lines):
             agg = flag_totals.setdefault(
@@ -739,6 +790,8 @@ def main():
                                      "classes": names[:8]}
                                     for n, rel, names in header_multi[:10]],
         },
+        "wrapper_bypass": {key: dict(counter)
+                           for key, counter in wrapper_totals.items()},
     }
 
     if args.as_json:
@@ -799,6 +852,25 @@ def main():
         out.append("        helpers serving one primary class are fine")
     else:
         out.append("(no multi-class headers)")
+
+    out.append("\n-- Wrapper-bypass candidates (consistency.md §M; measure first) --")
+    fam_lines = []
+    if len(wrapper_totals["time"]) >= 2:
+        items = ", ".join(f"{k}({v})" for k, v in wrapper_totals["time"].most_common())
+        fam_lines.append(f"  时间获取 {len(wrapper_totals['time'])} 种来源并存: {items}")
+        fam_lines.append("          (墙钟 vs 单调钟用途不同——分用途后再判断是否绕过)")
+    if len(wrapper_totals["rand"]) >= 2:
+        items = ", ".join(f"{k}({v})" for k, v in wrapper_totals["rand"].most_common())
+        fam_lines.append(f"  随机数 {len(wrapper_totals['rand'])} 种来源并存: {items}")
+    if len(wrapper_totals["crc"]) >= 2:
+        items = ", ".join(f"{k}({v})" for k, v in wrapper_totals["crc"].most_common())
+        fam_lines.append(f"  CRC 实现 {len(wrapper_totals['crc'])} 个不同名: {items}")
+    if fam_lines:
+        out.extend(fam_lines)
+        out.append("          (若项目已有统一封装，直调标准库的散点即候选偏离；"
+                   "先 grep 封装名定位封装层)")
+    else:
+        out.append("(各设施来源单一，未见绕过候选)")
 
     out.append("\n-- Function naming style (heuristic; ctors/dtors counted) --")
     if report["function_naming"]["distribution"]:

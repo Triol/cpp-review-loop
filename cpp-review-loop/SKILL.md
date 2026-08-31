@@ -7,6 +7,45 @@ description: Review and audit C++ codebases, optimized for large-scale projects 
 
 Review C++ like a senior engineer on a large team: map before judging, verify every finding by reading its context, and separate systemic patterns from one-off issues. In a large codebase the highest-value output is the *systemic pattern* ("raw owning `new` in 34 places across 9 modules"), not a pile of per-line nits. False positives destroy trust faster than missed issues — never report a problem you have not confirmed in context.
 
+## 0. 执行门与自检（防遗漏——每个门都有必须实际存在的产出物）
+
+跳步是执行失败的头号原因。下表是硬性顺序：**上一道门的产出物不存在，就禁止进入下一道门**。
+产出物可以是文件、命令输出或写进最终报告的一句话——缺失即该门未通过。
+
+### 审查轮
+
+| 门 | 动作 | 产出物（必须实际存在） |
+|---|---|---|
+| G1 分诊 | 确定 scope（整仓/模块/diff/单文件，§1） | 一句话范围声明（进入最终报告） |
+| G2 建图 | 运行 hotspots.py（§2） | 扫描输出（保留数字供引用） |
+| G3 读清单 | 按 §3 读 references/checklist.md + consistency.md + standards.md 的相关节 | 本轮启用的维度清单（写进派发表） |
+| G4 派发计划 | 列批次：维度 × 文件清单（§2 执行模型） | 批次表（每批 ≤ ~15 文件） |
+| G5 逐批执行 | 每批 subagent 返回后过 §2 第 4 条检查点 | 每批抽查记录 + 去重合并后的 findings 累积 |
+| G6 findings JSON | 写 `code-review-findings.json`（schema：references/report-format.md） | JSON 文件——make_report.py 会**硬校验**，缺字段直接拒绝渲染 |
+| G7 渲染 | make_report.py（§7） | HTML 路径（把报告与 findings 两个路径告知用户） |
+| G8 摘要 | 按 §6 格式输出聊天摘要 | 含"没覆盖什么"的覆盖声明 |
+
+### 修复轮（触发："处理审查反馈" / 用户给出 feedback JSON）
+
+| 门 | 动作 | 产出物 |
+|---|---|---|
+| F1 读反馈 | 解析 feedback JSON（§7） | 四类 verdict 的分组清单 |
+| F2 基线 | 跑 hotspots.py 快照（§7 第 5 步） | 修复前基线计数 |
+| F3 逐批 TDD | 每批红→绿 subagent（§7 第 6-7 步） | 每批红绿证据 + 检查点 (a)-(f) 记录 |
+| F4 复扫 | 每批检查点含被改文件复扫对比基线（第 8 步 (f)） | 对比结果（新候选当场归批解决） |
+| F5 复审 | 全项目复扫 + 不知情复审（第 9 步） | 复审结论（新问题：无 / 已修 / 留用户取舍） |
+| F6 汇报 | §7 第 11 步 | 修复清单（含测试）/ 跳过 / 待讨论 / 复审结果 |
+
+### 报告前自检（逐项回答 yes；任何一项 no，回到对应门补做）
+
+- [ ] 引用了 hotspots.py 的具体数字，而不是凭印象？
+- [ ] 每条发现都亲自打开过上下文核实？
+- [ ] findings JSON 每条都有 file/title/detail/fix，且 make_report.py 渲染成功？
+- [ ] 覆盖声明写明了"没覆盖什么"？
+- [ ] 系统性模式单独成节，未与单条发现重复？
+- [ ] Nit ≤ 10，且全部是项目自身惯例的偏离？
+- [ ] 修复轮：每批有红绿证据、复扫对比、依赖核查 (e)？收尾做过不知情复审？
+
 ## 1. Triage the request
 
 Determine scope and the user's concern (correctness? maintainability? performance? everything?) before reading code. Infer from the request; ask only if genuinely ambiguous:

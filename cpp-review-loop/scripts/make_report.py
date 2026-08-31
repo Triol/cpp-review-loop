@@ -335,7 +335,13 @@ applyFilters();
 
 
 def normalize(data, findings_path, out_path):
-    """Validate/normalize the findings payload and inject report metadata."""
+    """Validate/normalize the findings payload and inject report metadata.
+
+    Hard gates (防遗漏): a findings file missing scope/coverage/summary or a
+    finding missing file/title/detail/fix is REJECTED with a Chinese error
+    message — weaker executors then have to go back and fill the gap instead
+    of silently rendering an incomplete report.
+    """
     if not isinstance(data, dict):
         raise SystemExit("findings JSON root must be an object")
     findings = data.get("findings")
@@ -350,9 +356,6 @@ def normalize(data, findings_path, out_path):
         f.setdefault("id", f"F{i}")
         sev = str(f.get("severity", "Minor")).strip().capitalize()
         f["severity"] = sev if sev in SEVERITIES else "Minor"
-        for key in ("file", "title"):
-            if not str(f.get(key, "")).strip():
-                raise SystemExit(f"finding #{i} missing required field '{key}'")
         norm.append(f)
     data["findings"] = norm
 
@@ -364,6 +367,26 @@ def normalize(data, findings_path, out_path):
         data["systemic"] = systemic
 
     review = dict(data.get("review") or {})
+    summary = str(data.get("summary", "")).strip()
+    scope = str(review.get("scope", "")).strip()
+    coverage = str(review.get("coverage", "")).strip()
+
+    problems = []
+    if not scope:
+        problems.append("review.scope 为空——写明审查范围（整仓 / 模块 / diff / 单文件）")
+    if len(coverage) < 8:
+        problems.append("review.coverage 缺失——覆盖声明必须同时写明「覆盖了什么」和「没覆盖什么」")
+    if not summary:
+        problems.append("summary 缺失——总体评估 3-5 句（整体健康度 + 最需要关注的事）")
+    for i, f in enumerate(norm, 1):
+        for key in ("file", "title", "detail", "fix"):
+            if not str(f.get(key, "")).strip():
+                problems.append(f"finding {f.get('id', f'#{i}')} 缺少必填字段 '{key}'"
+                                "——每条发现必须有位置、问题描述与具体修复建议")
+    if problems:
+        raise SystemExit("findings JSON 未通过硬校验（防遗漏门槛），请补齐后重试：\n- "
+                         + "\n- ".join(problems))
+
     now = datetime.now()
     review.setdefault("date", now.strftime("%Y-%m-%d"))
     review["generated_at"] = now.strftime("%Y-%m-%d %H:%M:%S")

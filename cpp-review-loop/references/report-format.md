@@ -44,11 +44,12 @@
 }
 ```
 
-字段规则：
+字段规则（`make_report.py` 会**硬校验**，缺任一项将拒绝渲染并列出中文报错）：
 
+- **必填**：`review.scope`、`review.coverage`（必须同时写明覆盖与未覆盖）、`summary`；
+  每条 finding 的 `file`、`title`、`detail`、`fix`。这是防遗漏门槛——补齐才会渲染。
 - `severity` ∈ `Blocker | Major | Minor | Nit`（大小写不敏感，脚本会归一化；未知值按 Minor）。
 - `id`：建议显式写（`F1..Fn`，与发现汇总表一致）；省略时脚本自动编号。`systemic` 每项同样建议带 `id`（`S1..Sn`，省略时自动编号）。页面上编号徽章按严重度着色、点击即复制（悬停显示「点击复制」小字提示），用户复制编号（如 `F9`）即可与 agent 精确对话。
-- `file` / `title` 必填；`line`、`detail`、`fix`、`category` 建议都有。
 - 文本用**用户的语言**；`detail`/`fix` 里可以含 `</` 等字符（渲染脚本会转义）。
 - 想让用户对某个系统性模式表态时，把它同时列成一条 finding（`file` 填 `multiple`，`line` 省略）。
 

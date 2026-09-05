@@ -16,7 +16,7 @@ enum class TokenKind {
 
 struct Token {
     TokenKind kind = TokenKind::Invalid;
-    std::string text;    // 原始词文；String 时为解码后的内容
+    std::string text;    // 原始词文；String 时为解码后的内容；Identifier 可含 '$'（绝对引用）
     double number = 0.0; // kind == Number 时的数值
     int pos = 0;         // 源文本中的起始偏移
 };

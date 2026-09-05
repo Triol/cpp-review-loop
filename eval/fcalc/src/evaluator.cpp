@@ -159,11 +159,44 @@ std::string column_to_letters(int col) {
     return s;
 }
 
+// 错误细节的位置后缀：cell 为 "(formula)"（顶层公式）或单元格引用（如 "B2"）。
+std::string at(const std::string& cell) { return " at " + cell; }
+
+// 运算符 → 展示文本（用于错误细节）。
+const char* op_text(TokenKind op) {
+    switch (op) {
+        case TokenKind::Plus: return "+";
+        case TokenKind::Minus: return "-";
+        case TokenKind::Star: return "*";
+        case TokenKind::Slash: return "/";
+        case TokenKind::Caret: return "^";
+        case TokenKind::Percent: return "%";
+        case TokenKind::Amp: return "&";
+        case TokenKind::Eq: return "=";
+        case TokenKind::NotEq: return "<>";
+        case TokenKind::Less: return "<";
+        case TokenKind::LessEq: return "<=";
+        case TokenKind::Greater: return ">";
+        case TokenKind::GreaterEq: return ">=";
+        default: return "?";
+    }
+}
+
+// 范围表达式 → 归一化行列坐标（端点颠倒时交换，如 B2:A1 → A1:B2）。
+// 解析层已保证引用格式，失败属不可达（防御性返回 false）。
+bool range_bounds(const Expr& e, int& c1, int& r1, int& c2, int& r2) {
+    if (!parse_ref_coords(e.text, c1, r1) || !parse_ref_coords(e.text_end, c2, r2)) return false;
+    if (c1 > c2) std::swap(c1, c2);
+    if (r1 > r2) std::swap(r1, r2);
+    return true;
+}
+
 // 内置聚合函数（SUM / AVG / MIN / MAX / COUNT；IF / AND / OR / NOT 在 eval_call
 // 前走专用路径，不会到达这里。实参中的 error 已在收集阶段传播）。
 // 约定：只对 number 聚合，string / boolean 忽略；无可聚合数值时 SUM = 0，
 // AVG / MIN / MAX → #VALUE!；聚合结果溢出 → #VALUE!（同算术溢出约定）。
-Value apply_function(const std::string& name, const std::vector<Value>& args) {
+Value apply_function(const std::string& name, const std::vector<Value>& args,
+                     const std::string& cell) {
     if (name == "COUNT") {
         int n = 0;
         for (const Value& v : args) {
@@ -190,8 +223,10 @@ Value apply_function(const std::string& name, const std::vector<Value>& args) {
             ++count;
         }
         if (count == 0) {
-            return name == "SUM" ? Value::number(0.0)
-                                 : Value::error(ErrorFactory::value());
+            return name == "SUM"
+                       ? Value::number(0.0)
+                       : Value::error(ErrorFactory::value(
+                             "'" + name + "' has no numeric values to aggregate" + at(cell)));
         }
         double out = 0.0;
         if (name == "SUM") {
@@ -203,10 +238,13 @@ Value apply_function(const std::string& name, const std::vector<Value>& args) {
         } else {
             out = mx;
         }
-        if (!std::isfinite(out)) return Value::error(ErrorFactory::value());
+        if (!std::isfinite(out)) {
+            return Value::error(ErrorFactory::value(
+                "'" + name + "' result is not finite (overflow or domain error)" + at(cell)));
+        }
         return Value::number(out);
     }
-    return Value::error(ErrorFactory::name());  // 未知函数名
+    return Value::error(ErrorFactory::name("unknown function '" + name + "()'" + at(cell)));
 }
 
 }  // namespace
@@ -215,45 +253,55 @@ Value Evaluator::evaluate(const std::string& formula) {
     const ParseResult parsed = parse_formula(formula);
     if (!parsed.ok) return Value::error(parsed.error);
     VisitedSet visiting;
-    return eval_expr(*parsed.expr, 0, visiting);
+    return eval_expr(*parsed.expr, "(formula)", 0, visiting);
 }
 
-Value Evaluator::eval_expr(const Expr& e, int depth, VisitedSet& visiting) {
+Value Evaluator::eval_expr(const Expr& e, const std::string& cell, int depth, VisitedSet& visiting) {
     switch (e.kind) {
         case Expr::Kind::Number: return Value::number(e.number);
         case Expr::Kind::String: return Value::string(e.text);
         case Expr::Kind::Bool: return Value::boolean(e.boolean);
-        case Expr::Kind::Ref: return eval_ref(e, depth, visiting);
+        case Expr::Kind::Ref: return eval_ref(e, cell, depth, visiting);
         case Expr::Kind::Range:
             // 裸范围不是标量值：范围只能作为函数参数（在那里按行主序展开）。
-            return Value::error(ErrorFactory::value());
-        case Expr::Kind::Call: return eval_call(e, depth, visiting);
-        case Expr::Kind::Unary: return eval_unary(e, depth, visiting);
-        case Expr::Kind::Binary: return eval_binary(e, depth, visiting);
+            return Value::error(
+                ErrorFactory::value("range outside a function argument" + at(cell)));
+        case Expr::Kind::Call: return eval_call(e, cell, depth, visiting);
+        case Expr::Kind::Unary: return eval_unary(e, cell, depth, visiting);
+        case Expr::Kind::Binary: return eval_binary(e, cell, depth, visiting);
     }
-    return Value::error(ErrorFactory::value());  // 不可达
+    return Value::error(
+        ErrorFactory::value("internal error: unhandled expression kind" + at(cell)));  // 不可达
 }
 
-Value Evaluator::eval_unary(const Expr& e, int depth, VisitedSet& visiting) {
-    Value v = eval_expr(*e.lhs, depth, visiting);
+Value Evaluator::eval_unary(const Expr& e, const std::string& cell, int depth,
+                            VisitedSet& visiting) {
+    Value v = eval_expr(*e.lhs, cell, depth, visiting);
     if (v.is_error()) return v;  // 错误传播
     switch (e.op) {
         case TokenKind::Plus:
             return v;  // 一元 + 原样返回
         case TokenKind::Minus:
-            if (v.kind() != Value::Kind::Number) return Value::error(ErrorFactory::value());
+            if (v.kind() != Value::Kind::Number) {
+                return Value::error(
+                    ErrorFactory::value("unary '-' requires a numeric operand" + at(cell)));
+            }
             return Value::number(-v.as_number());
         case TokenKind::Percent:
-            if (v.kind() != Value::Kind::Number) return Value::error(ErrorFactory::value());
+            if (v.kind() != Value::Kind::Number) {
+                return Value::error(
+                    ErrorFactory::value("unary '%' requires a numeric operand" + at(cell)));
+            }
             return Value::number(v.as_number() / 100.0);
         default:
-            return Value::error(ErrorFactory::value());
+            return Value::error(ErrorFactory::value("unknown unary operator" + at(cell)));
     }
 }
 
-Value Evaluator::eval_binary(const Expr& e, int depth, VisitedSet& visiting) {
-    Value l = eval_expr(*e.lhs, depth, visiting);
-    Value r = eval_expr(*e.rhs, depth, visiting);
+Value Evaluator::eval_binary(const Expr& e, const std::string& cell, int depth,
+                             VisitedSet& visiting) {
+    Value l = eval_expr(*e.lhs, cell, depth, visiting);
+    Value r = eval_expr(*e.rhs, cell, depth, visiting);
     if (l.is_error()) return l;  // 错误传播：任一操作数为 error 则结果即该 error
     if (r.is_error()) return r;
 
@@ -267,7 +315,8 @@ Value Evaluator::eval_binary(const Expr& e, int depth, VisitedSet& visiting) {
 
     // 剩余为算术运算：仅接受数字
     if (l.kind() != Value::Kind::Number || r.kind() != Value::Kind::Number) {
-        return Value::error(ErrorFactory::value());
+        return Value::error(ErrorFactory::value(std::string("operator '") + op_text(e.op) +
+                                                "' requires numeric operands" + at(cell)));
     }
     const double a = l.as_number();
     const double b = r.as_number();
@@ -277,27 +326,42 @@ Value Evaluator::eval_binary(const Expr& e, int depth, VisitedSet& visiting) {
         case TokenKind::Minus: out = a - b; break;
         case TokenKind::Star: out = a * b; break;
         case TokenKind::Slash:
-            if (b == 0.0) return Value::error(ErrorFactory::div_zero());
+            if (b == 0.0) {
+                return Value::error(ErrorFactory::div_zero("division by zero" + at(cell)));
+            }
             out = a / b;
             break;
         case TokenKind::Caret: out = std::pow(a, b); break;
-        default: return Value::error(ErrorFactory::value());
+        default:
+            return Value::error(ErrorFactory::value(std::string("unknown binary operator '") +
+                                                    op_text(e.op) + "'" + at(cell)));
     }
-    if (!std::isfinite(out)) return Value::error(ErrorFactory::value());  // 溢出 / 定义域外
+    if (!std::isfinite(out)) {  // 溢出 / 定义域外
+        return Value::error(ErrorFactory::value(std::string("operator '") + op_text(e.op) +
+                                                "' overflowed or hit a domain error" + at(cell)));
+    }
     return Value::number(out);
 }
 
-Value Evaluator::eval_ref(const Expr& e, int depth, VisitedSet& visiting) {
+Value Evaluator::eval_ref(const Expr& e, const std::string& cell, int depth, VisitedSet& visiting) {
+    (void)cell;  // 引用错误的位置信息由被引用单元格自身（eval_cell）提供
     return eval_cell(e.text, depth, visiting);
 }
 
 // 单个单元格求值：深度限制 + 循环引用检测 + 递归求值（引用与范围展开共用）。
+// 进入单元格后，错误细节的位置上下文切换为该单元格自身的引用。
 Value Evaluator::eval_cell(const std::string& ref, int depth, VisitedSet& visiting) {
     const int next = depth + 1;  // 进入被引用单元格加深一层
-    if (next > kMaxCellDepth) return Value::error(ErrorFactory::cycle());
+    if (next > kMaxCellDepth) {
+        return Value::error(ErrorFactory::cycle("cell depth limit (" +
+                                                std::to_string(kMaxCellDepth) +
+                                                ") exceeded at '" + ref + "'"));
+    }
 
     // 标记法：正在求值的单元格再次被遇到 → 循环引用
-    if (!visiting.insert(ref).second) return Value::error(ErrorFactory::cycle());
+    if (!visiting.insert(ref).second) {
+        return Value::error(ErrorFactory::cycle("circular reference involving '" + ref + "'"));
+    }
     struct Guard {
         VisitedSet& set;
         const std::string& ref;
@@ -308,14 +372,17 @@ Value Evaluator::eval_cell(const std::string& ref, int depth, VisitedSet& visiti
     try {
         content = sheet_.get_cell_formula(ref);
     } catch (...) {
-        return Value::error(ErrorFactory::ref());  // 解析失败（异常）
+        return Value::error(ErrorFactory::ref("cell lookup failed for '" + ref +
+                                              "' (storage exception)"));  // 解析失败（异常）
     }
-    if (content.empty()) return Value::error(ErrorFactory::ref());  // 解析失败（不存在）
+    if (content.empty()) {
+        return Value::error(ErrorFactory::ref("missing cell '" + ref + "'"));  // 解析失败（不存在）
+    }
 
     if (content[0] == '=') {  // 单元格内是公式 → 递归求值
         const ParseResult parsed = parse_formula(content);
         if (!parsed.ok) return Value::error(parsed.error);
-        return eval_expr(*parsed.expr, next, visiting);
+        return eval_expr(*parsed.expr, ref, next, visiting);
     }
     return interpret_literal(content);  // 单元格内是原始字面量
 }
@@ -323,15 +390,13 @@ Value Evaluator::eval_cell(const std::string& ref, int depth, VisitedSet& visiti
 // 范围展开：把 start..end 归一化后按行主序（先行后列）枚举每个单元格。
 // 范围内不存在的单元格跳过（视为空，与聚合时忽略 string / bool 一致）；
 // 存在但求值为 error 的单元格传播该错误。
-bool Evaluator::expand_range(const Expr& e, int depth, VisitedSet& visiting,
-                             std::vector<Value>& out, Value& err) {
+bool Evaluator::expand_range(const Expr& e, const std::string& cell, int depth,
+                             VisitedSet& visiting, std::vector<Value>& out, Value& err) {
     int c1 = 0, r1 = 0, c2 = 0, r2 = 0;
-    if (!parse_ref_coords(e.text, c1, r1) || !parse_ref_coords(e.text_end, c2, r2)) {
-        err = Value::error(ErrorFactory::value());  // 不可达：解析层已验证引用格式
+    if (!range_bounds(e, c1, r1, c2, r2)) {
+        err = Value::error(ErrorFactory::value("invalid range bounds" + at(cell)));  // 不可达
         return false;
     }
-    if (c1 > c2) std::swap(c1, c2);  // 端点颠倒时归一化（B2:A1）
-    if (r1 > r2) std::swap(r1, r2);
     for (int row = r1; row <= r2; ++row) {
         for (int col = c1; col <= c2; ++col) {
             const std::string ref = column_to_letters(col) + std::to_string(row);
@@ -339,7 +404,8 @@ bool Evaluator::expand_range(const Expr& e, int depth, VisitedSet& visiting,
             try {
                 content = sheet_.get_cell_formula(ref);
             } catch (...) {
-                err = Value::error(ErrorFactory::ref());  // 存储层异常 → #REF!
+                err = Value::error(ErrorFactory::ref("cell lookup failed for '" + ref +
+                                                     "' (storage exception)"));  // 存储层异常
                 return false;
             }
             if (content.empty()) continue;  // 空 / 缺失单元格：不计入
@@ -356,42 +422,68 @@ bool Evaluator::expand_range(const Expr& e, int depth, VisitedSet& visiting,
 // IF(cond, then, else)：cond 按规则转布尔后只求值被选中的分支（惰性），
 // 未选中分支完全不求值（其中的 #DIV/0! / 循环引用都不会触发）。
 // 参数个数必须恰为 3，否则 #VALUE!；cond 求值为 error 时传播。
-Value Evaluator::eval_if(const Expr& e, int depth, VisitedSet& visiting) {
-    if (e.args.size() != 3) return Value::error(ErrorFactory::value());
-    Value cond = eval_expr(*e.args[0], depth, visiting);
+Value Evaluator::eval_if(const Expr& e, const std::string& cell, int depth, VisitedSet& visiting) {
+    if (e.args.size() != 3) {
+        return Value::error(ErrorFactory::value("IF requires exactly 3 arguments, got " +
+                                                std::to_string(e.args.size()) + at(cell)));
+    }
+    Value cond = eval_expr(*e.args[0], cell, depth, visiting);
     if (cond.is_error()) return cond;
-    return eval_expr(*e.args[coerce_to_bool(cond) ? 1 : 2], depth, visiting);
+    return eval_expr(*e.args[coerce_to_bool(cond) ? 1 : 2], cell, depth, visiting);
 }
 
-// AND / OR：参数（范围实参先展开）逐值求值，错误立即传播；
-// AND 遇 FALSE / OR 遇 TRUE 即可定结果并停止（短路），其后参数不再求值。
+// AND / OR：参数逐个求值，错误立即传播；AND 遇 FALSE / OR 遇 TRUE 即可定结果
+// 并停止（短路），其后参数不再求值。范围实参按行主序逐单元格惰性求值：
+// 每求值一个单元格即做一次短路判定，可定值之后的单元格（含其中的 error）不接触。
 // 全部求完仍不可定：AND → TRUE，OR → FALSE；无参数 → #VALUE!。
-Value Evaluator::eval_and_or(const Expr& e, int depth, VisitedSet& visiting) {
+Value Evaluator::eval_and_or(const Expr& e, const std::string& cell, int depth,
+                             VisitedSet& visiting) {
     const bool is_and = (e.text == "AND");
-    if (e.args.empty()) return Value::error(ErrorFactory::value());
+    if (e.args.empty()) {
+        return Value::error(ErrorFactory::value(
+            "'" + std::string(is_and ? "AND" : "OR") + "' requires at least 1 argument" + at(cell)));
+    }
+    // 短路判定：该值是否已能定下 AND / OR 的结果（AND 遇 FALSE / OR 遇 TRUE）。
+    const auto decides = [is_and](bool b) { return is_and ? !b : b; };
     for (const auto& arg : e.args) {
-        std::vector<Value> expanded;
         if (arg->kind == Expr::Kind::Range) {
-            Value err = Value::error(ErrorFactory::value());
-            if (!expand_range(*arg, depth, visiting, expanded, err)) return err;
-        } else {
-            Value v = eval_expr(*arg, depth, visiting);
-            if (v.is_error()) return v;
-            expanded.push_back(std::move(v));
+            int c1 = 0, r1 = 0, c2 = 0, r2 = 0;
+            if (!range_bounds(*arg, c1, r1, c2, r2)) {
+                return Value::error(
+                    ErrorFactory::value("invalid range bounds" + at(cell)));  // 不可达
+            }
+            for (int row = r1; row <= r2; ++row) {
+                for (int col = c1; col <= c2; ++col) {
+                    const std::string ref = column_to_letters(col) + std::to_string(row);
+                    std::string content;
+                    try {
+                        content = sheet_.get_cell_formula(ref);
+                    } catch (...) {
+                        return Value::error(ErrorFactory::ref(
+                            "cell lookup failed for '" + ref + "' (storage exception)"));
+                    }
+                    if (content.empty()) continue;  // 空 / 缺失单元格：不计入
+                    Value v = eval_cell(ref, depth, visiting);
+                    if (v.is_error()) return v;  // 错误先于任何可定值被遇到 → 传播
+                    if (decides(coerce_to_bool(v))) return Value::boolean(!is_and);
+                }
+            }
+            continue;  // 该范围未定下结果 → 继续下一实参
         }
-        for (const Value& v : expanded) {
-            const bool b = coerce_to_bool(v);
-            if (is_and && !b) return Value::boolean(false);
-            if (!is_and && b) return Value::boolean(true);
-        }
+        Value v = eval_expr(*arg, cell, depth, visiting);
+        if (v.is_error()) return v;
+        if (decides(coerce_to_bool(v))) return Value::boolean(!is_and);
     }
     return Value::boolean(is_and);
 }
 
 // NOT(x)：单参数转布尔后取反；参数个数非 1 → #VALUE!，error 传播。
-Value Evaluator::eval_not(const Expr& e, int depth, VisitedSet& visiting) {
-    if (e.args.size() != 1) return Value::error(ErrorFactory::value());
-    Value v = eval_expr(*e.args[0], depth, visiting);
+Value Evaluator::eval_not(const Expr& e, const std::string& cell, int depth, VisitedSet& visiting) {
+    if (e.args.size() != 1) {
+        return Value::error(ErrorFactory::value("NOT requires exactly 1 argument, got " +
+                                                std::to_string(e.args.size()) + at(cell)));
+    }
+    Value v = eval_expr(*e.args[0], cell, depth, visiting);
     if (v.is_error()) return v;
     return Value::boolean(!coerce_to_bool(v));
 }
@@ -399,23 +491,24 @@ Value Evaluator::eval_not(const Expr& e, int depth, VisitedSet& visiting) {
 // 函数调用：IF / AND / OR / NOT 走惰性 / 短路专用路径（在急切收集前分发）；
 // 其余函数逐参数收集值（范围参数展开为多值），任一 error 立即传播，
 // 然后按函数名（已规范化为大写）分发。
-Value Evaluator::eval_call(const Expr& e, int depth, VisitedSet& visiting) {
-    if (e.text == "IF") return eval_if(e, depth, visiting);
-    if (e.text == "AND" || e.text == "OR") return eval_and_or(e, depth, visiting);
-    if (e.text == "NOT") return eval_not(e, depth, visiting);
+Value Evaluator::eval_call(const Expr& e, const std::string& cell, int depth, VisitedSet& visiting) {
+    if (e.text == "IF") return eval_if(e, cell, depth, visiting);
+    if (e.text == "AND" || e.text == "OR") return eval_and_or(e, cell, depth, visiting);
+    if (e.text == "NOT") return eval_not(e, cell, depth, visiting);
 
     std::vector<Value> values;
     for (const auto& arg : e.args) {
         if (arg->kind == Expr::Kind::Range) {
-            Value err = Value::error(ErrorFactory::value());
-            if (!expand_range(*arg, depth, visiting, values, err)) return err;
+            Value err = Value::error(
+                ErrorFactory::value("range expansion failed" + at(cell)));  // 占位，展开时覆盖
+            if (!expand_range(*arg, cell, depth, visiting, values, err)) return err;
             continue;
         }
-        Value v = eval_expr(*arg, depth, visiting);
+        Value v = eval_expr(*arg, cell, depth, visiting);
         if (v.is_error()) return v;
         values.push_back(std::move(v));
     }
-    return apply_function(e.text, values);
+    return apply_function(e.text, values, cell);
 }
 
 }  // namespace fcalc

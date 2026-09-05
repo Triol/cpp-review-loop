@@ -52,6 +52,18 @@ void expect_error(const Value& v, ErrorType type, const std::string& what) {
     }
 }
 
+// 断言错误携带的细节文本（detail 不进入 to_text，仅供 API 查询）。
+void expect_detail(const Value& v, const std::string& expected, const std::string& what) {
+    ++g_checks;
+    if (!v.is_error()) {
+        fail(what + " (expected detail \"" + expected + "\", got non-error value " + v.to_text() +
+             ")");
+    } else if (v.as_error().detail() != expected) {
+        fail(what + " (expected detail \"" + expected + "\", got \"" + v.as_error().detail() +
+             "\")");
+    }
+}
+
 void expect_text(const std::string& actual, const std::string& expected, const std::string& what) {
     ++g_checks;
     if (actual != expected) {
@@ -148,6 +160,50 @@ FC_TEST(cell_reference) {
     expect_error(ev("=A100", sheet), ErrorType::Name, "=A100 row > 99 -> #NAME?");
     expect_error(ev("=ZZZ1", sheet), ErrorType::Name, "=ZZZ1 bad column -> #NAME?");
     expect_error(ev("=A1B", sheet), ErrorType::Name, "=A1B malformed ref -> #NAME?");
+}
+
+// 引用大小写不敏感：不同大小写写法在解析层统一规范化为大写引用（a1 == A1）。
+FC_TEST(reference_case_insensitive) {
+    MapSheet sheet = make_sheet({{"A1", "7"}, {"B2", "3"}, {"ZZ9", "1.5"}});
+    expect_number(ev("=a1", sheet), 7.0, "=a1 normalizes to A1");
+    expect_number(ev("=A1", sheet), 7.0, "=A1 baseline");
+    expect_number(ev("=b2", sheet), 3.0, "=b2 normalizes to B2");
+    expect_number(ev("=B2", sheet), 3.0, "=B2 baseline");
+    expect_number(ev("=zz9", sheet), 1.5, "=zz9 normalizes to ZZ9");
+    expect_number(ev("=Zz9", sheet), 1.5, "=Zz9 normalizes to ZZ9");
+    expect_number(ev("=SUM(a1:B2)", sheet), 10.0, "mixed-case range == uppercase range");
+    expect_number(ev("=SUM(A1:b2)", sheet), 10.0, "mixed-case range (end lowercase)");
+    // 规范化同样作用于公式单元格内部：小写引用正确解析并递归求值。
+    MapSheet formulas = make_sheet({{"A1", "=b2*2"}, {"B2", "5"}});
+    expect_number(ev("=A1", formulas), 10.0, "=A1 resolves lowercase ref inside formula");
+    expect_number(ev("=a1", formulas), 10.0, "=a1 same cell, case-insensitive");
+}
+
+// $ 绝对引用：$A$1 / A$1 / $A1 三种形态均合法，解析时忽略 $ 语义（与 A1 相同），
+// 内部规范化后 $ 被剥离（能按普通引用进入单元格求值与范围展开）。
+FC_TEST(absolute_reference_dollar) {
+    MapSheet sheet = make_sheet({{"A1", "7"}, {"B2", "3"}, {"C3", "5"}});
+    // 四种形态指向同一单元格。
+    expect_number(ev("=A1", sheet), 7.0, "=A1 relative baseline");
+    expect_number(ev("=$A1", sheet), 7.0, "=$A1 column-absolute");
+    expect_number(ev("=A$1", sheet), 7.0, "=A$1 row-absolute");
+    expect_number(ev("=$A$1", sheet), 7.0, "=$A$1 fully absolute");
+    expect_number(ev("=$a$1", sheet), 7.0, "=$a$1 lowercase absolute");
+    expect_number(ev("=2*$B$2", sheet), 6.0, "absolute ref in arithmetic");
+    expect_number(ev("=$B$2%", sheet), 0.03, "postfix % on absolute ref");
+    // 规范化剥离 $：=$A$1 进入 A1 的公式递归求值。
+    MapSheet formulas = make_sheet({{"A1", "=B2*10"}, {"B2", "4"}});
+    expect_number(ev("=$A$1", formulas), 40.0, "=$A$1 evaluates A1's formula");
+    // 范围端点可各自携带 '$'，四种组合等价。
+    expect_number(ev("=SUM($A$1:$C$3)", sheet), 15.0, "absolute range");
+    expect_number(ev("=SUM(A$1:$C3)", sheet), 15.0, "mixed-absolute range");
+    expect_number(ev("=SUM($A1:C$3)", sheet), 15.0, "mixed-absolute range (marks swapped)");
+    expect_number(ev("=SUM(A1:C3)", sheet), 15.0, "plain range baseline");
+    // 非法 '$' 用法仍报错。
+    expect_error(ev("=A$"), ErrorType::Name, "=A$ trailing '$' -> #NAME?");
+    expect_error(ev("=A$B1"), ErrorType::Name, "=A$B1 '$' before letters -> #NAME?");
+    expect_error(ev("=$5"), ErrorType::Value, "=$5 '$' before digit -> invalid token");
+    expect_error(ev("=$"), ErrorType::Value, "=$ bare '$' -> invalid token");
 }
 
 // ---------- 运算符 ----------
@@ -383,6 +439,68 @@ FC_TEST(cycle_detection) {
     expect_error(ev("=A1", too_deep), ErrorType::Cycle, "chain of 65 cell visits -> #CYCLE!");
 }
 
+// ---------- 错误细节（detail 字段） ----------
+
+// detail 只说明原因、不进入 to_text()；随错误传播原样携带。
+FC_TEST(error_detail_div_zero) {
+    Value v = ev("=1/0");
+    expect_error(v, ErrorType::DivZero, "=1/0 is #DIV/0!");
+    expect_detail(v, "division by zero at (formula)", "=1/0 detail names location (formula)");
+    expect_text(v.to_text(), "#DIV/0!", "detail is not part of to_text");
+
+    MapSheet sheet = make_sheet({{"B2", "=1/0"}});
+    Value in_cell = ev("=B2", sheet);
+    expect_error(in_cell, ErrorType::DivZero, "#DIV/0! raised inside B2");
+    expect_detail(in_cell, "division by zero at B2", "detail names the cell B2");
+
+    Value propagated = ev("=2+(1/0)");
+    expect_error(propagated, ErrorType::DivZero, "error propagates through +");
+    expect_detail(propagated, "division by zero at (formula)", "detail survives propagation");
+}
+
+FC_TEST(error_detail_name) {
+    Value v = ev("=FOO");
+    expect_error(v, ErrorType::Name, "=FOO is #NAME?");
+    expect_detail(v, "unknown name 'FOO'", "=FOO detail names FOO");
+
+    Value fn = ev("=FOO(1)");
+    expect_error(fn, ErrorType::Name, "=FOO(1) is #NAME?");
+    expect_detail(fn, "unknown function 'FOO()' at (formula)", "unknown function detail");
+
+    MapSheet sheet = make_sheet({{"B2", "=nope"}});
+    Value in_cell = ev("=B2", sheet);
+    expect_error(in_cell, ErrorType::Name, "#NAME? raised inside B2");
+    expect_detail(in_cell, "unknown name 'nope'", "detail from inside cell keeps name");
+}
+
+FC_TEST(error_detail_cycle) {
+    MapSheet self = make_sheet({{"A1", "=A1"}});
+    Value v = ev("=A1", self);
+    expect_error(v, ErrorType::Cycle, "self reference is #CYCLE!");
+    expect_detail(v, "circular reference involving 'A1'", "cycle detail names A1");
+
+    MapSheet deep = chain_sheet(64);  // 第 65 次进入 A65 时超限
+    Value d = ev("=A1", deep);
+    expect_error(d, ErrorType::Cycle, "chain of 65 cell visits -> #CYCLE!");
+    expect_detail(d, "cell depth limit (64) exceeded at 'A65'", "depth detail names A65");
+}
+
+FC_TEST(error_detail_ref) {
+    MapSheet sheet = make_sheet({{"A1", "=B9+1"}});
+    Value v = ev("=B9", sheet);
+    expect_error(v, ErrorType::Ref, "=B9 missing cell");
+    expect_detail(v, "missing cell 'B9'", "missing-cell detail names B9");
+
+    Value inner = ev("=A1", sheet);
+    expect_error(inner, ErrorType::Ref, "missing cell propagates through A1");
+    expect_detail(inner, "missing cell 'B9'", "propagated ref detail preserved");
+
+    ThrowingSheet throwing;
+    Value t = ev("=A1", throwing);
+    expect_error(t, ErrorType::Ref, "sheet throws -> #REF!");
+    expect_detail(t, "cell lookup failed for 'A1' (storage exception)", "storage exception detail");
+}
+
 FC_TEST(cell_evaluation_semantics) {
     MapSheet sheet = make_sheet({{"A1", "2"}, {"A2", "=A1*3"}, {"A3", "=A2+A1"}});
     expect_number(ev("=A2", sheet), 6.0, "referenced formula evaluated recursively");
@@ -550,6 +668,14 @@ FC_TEST(factory_and_text) {
     expect_text(Value::number(1024.0).to_text(), "1024", "integer formatting");
     expect_text(Value::number(-3.5).to_text(), "-3.5", "negative decimal formatting");
     expect_text(Value::boolean(true).to_text(), "TRUE", "bool to text");
+    // detail 重载：携带时 round-trip 可查，缺省为空；detail 不进入 to_text。
+    expect_detail(Value::error(ErrorFactory::div_zero("division by zero at B2")),
+                  "division by zero at B2", "factory detail round-trip");
+    expect_detail(Value::error(ErrorFactory::value()), "", "factory default detail is empty");
+    expect_text(Value::error(ErrorFactory::name("unknown name FOO()")).to_text(), "#NAME?",
+                "detail excluded from to_text");
+    expect_detail(Value::error(Error(ErrorType::Value, "constructor detail")), "constructor detail",
+                  "Error constructor accepts detail");
 }
 
 int main() {

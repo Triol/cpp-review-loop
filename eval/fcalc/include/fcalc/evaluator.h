@@ -51,21 +51,23 @@ public:
     Value evaluate(const std::string& formula);
 
 private:
-    Value eval_expr(const Expr& e, int depth, VisitedSet& visiting);
-    Value eval_unary(const Expr& e, int depth, VisitedSet& visiting);
-    Value eval_binary(const Expr& e, int depth, VisitedSet& visiting);
-    Value eval_ref(const Expr& e, int depth, VisitedSet& visiting);
-    Value eval_call(const Expr& e, int depth, VisitedSet& visiting);
+    // cell：错误细节的位置上下文 —— 顶层公式为 "(formula)"，单元格内公式为其规范化引用；
+    // 求值进入某单元格后（eval_cell），上下文切换为该单元格自身的引用。
+    Value eval_expr(const Expr& e, const std::string& cell, int depth, VisitedSet& visiting);
+    Value eval_unary(const Expr& e, const std::string& cell, int depth, VisitedSet& visiting);
+    Value eval_binary(const Expr& e, const std::string& cell, int depth, VisitedSet& visiting);
+    Value eval_ref(const Expr& e, const std::string& cell, int depth, VisitedSet& visiting);
+    Value eval_call(const Expr& e, const std::string& cell, int depth, VisitedSet& visiting);
     // 逻辑函数：IF 只求值被选中分支（惰性）；AND/OR 逐参数短路（遇可定值即停，
     // error 传播）；NOT 单参数取反。三者均在 eval_call 的急切参数收集前分发。
-    Value eval_if(const Expr& e, int depth, VisitedSet& visiting);
-    Value eval_and_or(const Expr& e, int depth, VisitedSet& visiting);
-    Value eval_not(const Expr& e, int depth, VisitedSet& visiting);
+    Value eval_if(const Expr& e, const std::string& cell, int depth, VisitedSet& visiting);
+    Value eval_and_or(const Expr& e, const std::string& cell, int depth, VisitedSet& visiting);
+    Value eval_not(const Expr& e, const std::string& cell, int depth, VisitedSet& visiting);
     // 单个单元格求值（eval_ref 与范围展开共用：深度 / 循环检测 / 递归求值）。
     Value eval_cell(const std::string& ref, int depth, VisitedSet& visiting);
     // 范围展开：行主序枚举单元格并把求值结果追加到 out。
     // 范围内不存在的单元格跳过（视为空）；返回 false 时 err 为应传播的错误。
-    bool expand_range(const Expr& e, int depth, VisitedSet& visiting,
+    bool expand_range(const Expr& e, const std::string& cell, int depth, VisitedSet& visiting,
                       std::vector<Value>& out, Value& err);
 
     Sheet& sheet_;

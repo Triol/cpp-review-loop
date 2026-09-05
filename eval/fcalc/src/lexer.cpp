@@ -26,7 +26,9 @@ void Lexer::scan() {
     const char c = src_[offset_];
     if (is_digit(c) || (c == '.' && offset_ + 1 < src_.size() && is_digit(src_[offset_ + 1]))) {
         scan_number();
-    } else if (is_letter(c)) {
+    } else if (is_letter(c) || (c == '$' && offset_ + 1 < src_.size() &&
+                                is_letter(src_[offset_ + 1]))) {
+        // '$' 后跟字母 → 绝对引用的起始（如 $A$1）；其余位置仍按非法字符处理
         scan_identifier();
     } else if (c == '"') {
         scan_string();
@@ -56,11 +58,15 @@ void Lexer::scan_number() {
                      static_cast<int>(start)};
 }
 
-// 标识符：字母开头的字母数字串（后续由语法层分类为布尔 / 单元格引用 / 未知名字）。
+// 标识符：字母或 "$字母" 开头的字母数字串，内部可含 '$'（绝对引用标记，如 $A$1 / A$1）；
+// 后续由语法层分类为布尔 / 单元格引用 / 未知名字。
 void Lexer::scan_identifier() {
     const std::size_t start = offset_;
-    ++offset_;  // 首字符必为字母
-    while (offset_ < src_.size() && (is_letter(src_[offset_]) || is_digit(src_[offset_]))) ++offset_;
+    ++offset_;  // 首字符必为字母或 '$'
+    while (offset_ < src_.size() &&
+           (is_letter(src_[offset_]) || is_digit(src_[offset_]) || src_[offset_] == '$')) {
+        ++offset_;
+    }
     current_ = Token{TokenKind::Identifier, src_.substr(start, offset_ - start), 0.0,
                      static_cast<int>(start)};
 }

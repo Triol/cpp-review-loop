@@ -14,11 +14,16 @@ std::string to_upper(std::string s) {
 }
 
 // 单元格引用 A1..ZZ99：1-2 个列字母 + 1-2 位行号（1..99）。
-// 匹配时输出规范化引用（大写列号 + 无前导零行号），如 "a01" → "A1"。
+// '$' 为绝对引用标记，允许出现在列字母前（$A1）、行号前（A$1）或同时出现（$A$1）；
+// 解析时忽略其语义（与相对引用相同），规范化输出不含 '$'。
+// 匹配时输出规范化引用（大写列号 + 无前导零行号），如 "a01" → "A1"、"$a$1" → "A1"。
 bool try_cell_ref(const std::string& id, std::string& out) {
     std::size_t i = 0;
+    if (i < id.size() && id[i] == '$') ++i;  // 列绝对标记（仅识别，语义与相对引用相同）
+    const std::size_t letters_start = i;
     while (i < id.size() && is_letter(id[i])) ++i;
-    const std::size_t letters = i;
+    const std::size_t letters = i - letters_start;
+    if (i < id.size() && id[i] == '$') ++i;  // 行绝对标记（仅识别，语义与相对引用相同）
     const std::size_t digits_start = i;
     while (i < id.size() && is_digit(id[i])) ++i;
     const std::size_t digits = i - digits_start;
@@ -26,7 +31,7 @@ bool try_cell_ref(const std::string& id, std::string& out) {
     int row = 0;
     for (std::size_t k = digits_start; k < i; ++k) row = row * 10 + (id[k] - '0');
     if (row < 1) return false;
-    out = to_upper(id.substr(0, letters)) + std::to_string(row);
+    out = to_upper(id.substr(letters_start, letters)) + std::to_string(row);
     return true;
 }
 
@@ -110,7 +115,7 @@ ParseResult parse_formula(const std::string& text) {
     const std::size_t start = text.find_first_not_of(" \t\r\n");
     if (start == std::string::npos || text[start] != '=') {
         ParseResult r;  // 公式必须以 '=' 开头
-        r.error = ErrorFactory::value();
+        r.error = ErrorFactory::value("formula must start with '='");
         return r;
     }
     Parser parser{Lexer(text)};  // 花括号避免最令人头疼的解析（most vexing parse）
@@ -122,7 +127,7 @@ Parser::Parser(Lexer lexer) : lexer_(std::move(lexer)) {}
 ParseResult Parser::parse() {
     if (peek().kind != TokenKind::Eq) {  // parse_formula 已保证；防御性检查
         ParseResult r;
-        r.error = ErrorFactory::value();
+        r.error = ErrorFactory::value("expected leading '='");
         return r;
     }
     advance();
@@ -135,7 +140,7 @@ ParseResult Parser::parse() {
     }
     if (peek().kind != TokenKind::End) {  // 存在未消费的尾随内容 → 语法错误
         ParseResult r;
-        r.error = ErrorFactory::value();
+        r.error = ErrorFactory::value("unexpected trailing content after expression");
         return r;
     }
     ParseResult r;
@@ -259,21 +264,22 @@ std::unique_ptr<Expr> Parser::parse_primary() {
                 if (peek().kind == TokenKind::Colon) {  // IDENT ':' → 范围 A1:B3
                     advance();
                     if (peek().kind != TokenKind::Identifier) {
-                        fail(ErrorFactory::value());  // 缺少范围结束引用
+                        fail(ErrorFactory::value("missing cell reference after ':'"));
                         return nullptr;
                     }
                     const Token end_tok = peek();
                     advance();
                     std::string end_ref;
                     if (!try_cell_ref(end_tok.text, end_ref)) {
-                        fail(ErrorFactory::value());  // 范围结束不是单元格引用
+                        fail(ErrorFactory::value("range end '" + end_tok.text +
+                                                 "' is not a cell reference"));
                         return nullptr;
                     }
                     return make_range(ref, end_ref);
                 }
                 return make_ref(ref);
             }
-            fail(ErrorFactory::name());  // 既非布尔也非引用 → 未知名字
+            fail(ErrorFactory::name("unknown name '" + ident.text + "'"));  // 非布尔非引用 → 未知名字
             return nullptr;
         }
         case TokenKind::LParen: {
@@ -281,14 +287,20 @@ std::unique_ptr<Expr> Parser::parse_primary() {
             std::unique_ptr<Expr> inner = parse_expr();
             if (!inner) return nullptr;
             if (peek().kind != TokenKind::RParen) {
-                fail(ErrorFactory::value());  // 缺少 ')'
+                fail(ErrorFactory::value("missing ')' in parenthesized expression"));
                 return nullptr;
             }
             advance();
             return inner;
         }
+        case TokenKind::End:
+            fail(ErrorFactory::value("unexpected end of formula"));  // 意外到达输入末尾
+            return nullptr;
+        case TokenKind::Invalid:
+            fail(ErrorFactory::value("invalid input: " + token.text));  // 非法字符 / 未终止字符串
+            return nullptr;
         default:
-            fail(ErrorFactory::value());  // 意外 Token（含词法 Invalid）
+            fail(ErrorFactory::value("unexpected token '" + token.text + "'"));  // 意外 Token
             return nullptr;
     }
 }
@@ -313,7 +325,7 @@ std::unique_ptr<Expr> Parser::parse_call_tail(std::string name) {
             advance();
             return call;
         }
-        fail(ErrorFactory::value());  // 缺少 ',' 或 ')'
+        fail(ErrorFactory::value("expected ',' or ')' in call to " + call->text));  // 缺少 ',' 或 ')'
         return nullptr;
     }
 }

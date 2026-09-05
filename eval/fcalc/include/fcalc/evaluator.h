@@ -4,7 +4,9 @@
 // 错误传播、循环引用检测与 64 层访问深度限制。
 
 #include <map>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -42,7 +44,8 @@ inline constexpr int kMaxCellDepth = 64;
 // 求值期间的"正在求值"标记集（检测循环引用）。
 using VisitedSet = std::unordered_set<std::string>;
 
-// 求值器：解析 + 递归求值。
+// 求值器：解析 + 递归求值；单元格公式按公式原文缓存解析结果（共享只读 AST），
+// 使 =SUM(A1:A100) 这类范围求值不再对同一单元格公式重复做词法+语法分析。
 class Evaluator {
 public:
     explicit Evaluator(Sheet& sheet) : sheet_(sheet) {}
@@ -71,6 +74,9 @@ private:
                       std::vector<Value>& out, Value& err);
 
     Sheet& sheet_;
+    // 解析缓存：键为单元格公式原文（eval_cell 每次求值都重新读取内容，Sheet 修改后
+    // 键随之变化，不会命中过期条目）；值为共享只读 AST。
+    std::unordered_map<std::string, std::shared_ptr<const Expr>> parse_cache_;
 };
 
 // 一步到位的自由函数。

@@ -426,6 +426,48 @@ FC_TEST(error_parse_deep_nesting) {
     expect_detail(v, "expression nesting too deep", "nesting detail names the limit");
 }
 
+// F21（审查修复回归）：^ 右结合自递归（parse_power）同为无界递归 —— 超限返回 #VALUE!。
+// 注意：链必须是 1^1^1^…（每个 ^ 带操作数）。若生成 "1^^^^…1"（^ 之间无操作数），
+// 则在第一层就是浅层语法错误（"unexpected token '^'"），构造不出深递归。
+FC_TEST(error_parse_deep_power_chain) {
+    const int n = 100000;  // 远超上限（128），足以让未修复的无界递归爆栈
+    std::string formula = "=1";
+    for (int i = 0; i < n; ++i) formula += "^1";
+    Value v = ev(formula);
+    expect_error(v, ErrorType::Value, "100000-deep '^' chain -> #VALUE! (no crash)");
+    expect_detail(v, "expression nesting too deep", "power chain detail names nesting limit");
+}
+
+// F21（审查修复回归）：一元 +/- 连用链（parse_unary 自递归）同为无界递归 ——
+// 超限返回 #VALUE!（detail 含 nesting），而不是栈溢出崩溃。
+FC_TEST(error_parse_deep_unary_chain) {
+    const int n = 100000;  // 远超上限（128），足以让未修复的无界递归爆栈
+    std::string formula = "=";
+    formula.append(static_cast<std::size_t>(n), '-');
+    formula += "5";
+    Value v = ev(formula);
+    expect_error(v, ErrorType::Value, "100000-deep unary minus chain -> #VALUE! (no crash)");
+    expect_detail(v, "expression nesting too deep", "unary chain detail names nesting limit");
+}
+
+// F2（审查修复回归）：解析缓存键正确性 —— 缓存以公式文本为键、AST 只读共享，
+// 被两个公式引用的单元格内容修改后重新求值，结果必须反映新内容（不得复用过期状态）。
+FC_TEST(cache_key_reflects_sheet_mutation) {
+    MapSheet sheet = make_sheet({{"A1", "1"}, {"A2", "2"},
+                                 {"B1", "=A1+A2"}, {"B2", "=B1+A1"}});
+    Evaluator eval(sheet);  // 同一求值器：解析缓存跨多次 evaluate 存活
+    expect_number(eval.evaluate("=B1"), 3.0, "first pass: B1 = A1+A2");
+    expect_number(eval.evaluate("=B2"), 4.0, "first pass: B2 = B1+A1");
+    // 修改被引用的 A1（两个公式都读它）后重求值：引用在求值期重新读取单元格。
+    sheet.cells["A1"] = "5";
+    expect_number(eval.evaluate("=B1"), 7.0, "after A1=5: B1 reflects new content");
+    expect_number(eval.evaluate("=B2"), 12.0, "after A1=5: B2 reflects new content");
+    // 被引用单元格从字面量换成公式（内容形态变化）同样生效；范围求值走同一缓存路径。
+    sheet.cells["A2"] = "=A1*2";
+    expect_number(eval.evaluate("=B1"), 15.0, "A2 now a formula: B1 = 5+10");
+    expect_number(eval.evaluate("=SUM(A1:A2)"), 15.0, "SUM over mutated range");
+}
+
 FC_TEST(error_ref) {
     MapSheet sheet = make_sheet({{"A1", "=B9+1"}});
     expect_error(ev("=B9", sheet), ErrorType::Ref, "missing cell");

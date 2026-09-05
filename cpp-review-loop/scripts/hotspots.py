@@ -112,7 +112,9 @@ MEMBER_RULES = [
 INCLUDE_PATH_RE = re.compile(r'\s*#\s*include\s*([<"])([^>"]+)[>"]')
 GUARD_RE = re.compile(r"^\s*#\s*ifndef\s+\w+", re.MULTILINE)
 
-TODO_RE = re.compile(r"\b(?:TODO|FIXME|HACK|XXX)\b")
+# XXX removed: it false-positives on comments documenting "#XXX" error-text
+# conventions (e.g. central error factories) — see VALIDATION §7.
+TODO_RE = re.compile(r"\b(?:TODO|FIXME|HACK)\b")
 INCLUDE_RE = re.compile(r"^\s*#\s*include\b")
 
 # Log/output format signals (consistency.md §L) — measured on RAW lines.

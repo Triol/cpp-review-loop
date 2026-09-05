@@ -13,6 +13,7 @@ namespace fcalc {
 // 数字 → 文本（& 连接与结果显示共用）：整数不带小数点，其余保留 15 位有效数字。
 inline std::string format_number(double v) {
     char buf[40];
+    if (v == 0.0) return "0";  // -0.0 == 0.0 为真：负零归一化，避免 "%.0f" 输出 "-0"
     if (std::isfinite(v) && v == std::floor(v) && std::fabs(v) < 1e15) {
         std::snprintf(buf, sizeof(buf), "%.0f", v);
     } else {

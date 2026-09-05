@@ -33,8 +33,10 @@ struct Expr {
 };
 
 // 解析结果：ok == false 时 error 为应返回给调用方的错误值。
+// expr 为只读共享 AST：Evaluator 的解析缓存会跨求值持有同一棵树，求值只读遍历，
+// 任何代码都不得修改节点（const 限定在类型层面强制）。
 struct ParseResult {
-    std::unique_ptr<Expr> expr;
+    std::shared_ptr<const Expr> expr;
     Error error{ErrorType::Value};
     bool ok = false;
 };
@@ -66,7 +68,8 @@ private:
 
     Lexer lexer_;
     Error error_{ErrorType::Value};
-    int depth_ = 0;  // 括号嵌套深度（parse_primary 的 LParen 分支维护，超限报 #VALUE!）
+    int depth_ = 0;  // 递归下降深度：parse_unary 入口（一元链 / 括号 / 函数实参的每层嵌套）
+                     // 与 parse_power 的 ^ 递归各自加一，超限报 #VALUE!
 };
 
 }  // namespace fcalc

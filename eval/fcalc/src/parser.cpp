@@ -1,17 +1,9 @@
 #include "fcalc/parser.h"
 
-#include <cctype>
+#include "text_util.h"
 
 namespace fcalc {
 namespace {
-
-bool is_digit(char c) { return c >= '0' && c <= '9'; }
-bool is_letter(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
-
-std::string to_upper(std::string s) {
-    for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    return s;
-}
 
 // 单元格引用 A1..ZZ99：1-2 个列字母 + 1-2 位行号（1..99）。
 // '$' 为绝对引用标记，允许出现在列字母前（$A1）、行号前（A$1）或同时出现（$A$1）；
@@ -109,14 +101,16 @@ bool is_comparison(TokenKind k) {
     }
 }
 
-// 递归下降括号嵌套深度上限：深嵌套公式（如 "=((((…，可来自外部注入的单元格内容）
-// 会使递归下降栈溢出崩溃，超限时报 #VALUE! 而非崩溃。
+// 递归下降深度上限：一元 +/- 连用链（=-----…5）在 parse_unary 入口计数（括号与函数
+// 实参的每层嵌套下降也经过该入口），右结合幂链（=1^1^1^…）在 parse_power 的 ^ 递归处
+// 计数；无界深嵌套公式（可来自外部注入的单元格内容）会使递归下降栈溢出崩溃，
+// 超限时报 #VALUE! 而非崩溃。
 constexpr int kMaxNestingDepth = 128;
 
 }  // namespace
 
 ParseResult parse_formula(const std::string& text) {
-    const std::size_t start = text.find_first_not_of(" \t\r\n");
+    const std::size_t start = text.find_first_not_of(kWhitespace);
     if (start == std::string::npos || text[start] != '=') {
         ParseResult r;  // 公式必须以 '=' 开头
         r.error = ErrorFactory::value("formula must start with '='");
@@ -209,12 +203,21 @@ std::unique_ptr<Expr> Parser::parse_multiplicative() {
 }
 
 // ^ 右结合；底数经一元层（-2^2 = (-2)^2 = 4），指数侧允许一元符号（2^-3）。
+// 注意：^ 的右结合递归发生在 base = parse_unary() 返回之后（已退出 parse_unary 的
+// 深度计数窗口），故此处对每次 ^ 递归单独计数，与 parse_unary 入口共同覆盖全部
+// 无界递归路径。
 std::unique_ptr<Expr> Parser::parse_power() {
     std::unique_ptr<Expr> base = parse_unary();
     if (!base) return nullptr;
     if (peek().kind == TokenKind::Caret) {
         advance();
+        ++depth_;  // ^ 右结合逐层递归：每次加深一层
+        if (depth_ > kMaxNestingDepth) {
+            fail(ErrorFactory::value("expression nesting too deep"));
+            return nullptr;  // 出错路径不回退 depth_：nullptr 一路传播，整次解析放弃
+        }
         std::unique_ptr<Expr> exponent = parse_power();  // 递归下降 → 右结合
+        --depth_;
         if (!exponent) return nullptr;
         return make_binary(TokenKind::Caret, std::move(base), std::move(exponent));
     }
@@ -222,14 +225,23 @@ std::unique_ptr<Expr> Parser::parse_power() {
 }
 
 std::unique_ptr<Expr> Parser::parse_unary() {
+    ++depth_;  // 深度计数入口：幂链 / 一元链 / 括号 / 函数实参的每层下降都经过这里
+    if (depth_ > kMaxNestingDepth) {
+        fail(ErrorFactory::value("expression nesting too deep"));
+        return nullptr;
+    }
     const TokenKind op = peek().kind;
     if (op == TokenKind::Minus || op == TokenKind::Plus) {
         advance();
         std::unique_ptr<Expr> operand = parse_unary();  // 允许连用：--5
-        if (!operand) return nullptr;
+        if (!operand) return nullptr;  // 出错路径不回退 depth_：nullptr 一路传播，整次解析放弃
+        --depth_;
         return make_unary(op, std::move(operand));
     }
-    return parse_postfix();
+    std::unique_ptr<Expr> expr = parse_postfix();
+    if (!expr) return nullptr;
+    --depth_;
+    return expr;
 }
 
 // 后缀 % 可连用：50%% = 0.005。
@@ -287,24 +299,14 @@ std::unique_ptr<Expr> Parser::parse_primary() {
             return nullptr;
         }
         case TokenKind::LParen: {
-            ++depth_;  // 进入括号嵌套
-            if (depth_ > kMaxNestingDepth) {
-                fail(ErrorFactory::value("expression nesting too deep"));
-                return nullptr;
-            }
-            advance();
+            advance();  // 括号嵌套深度经 parse_unary 入口计数（此处不再重复计数）
             std::unique_ptr<Expr> inner = parse_expr();
-            if (!inner) {
-                --depth_;
-                return nullptr;
-            }
+            if (!inner) return nullptr;
             if (peek().kind != TokenKind::RParen) {
-                --depth_;
                 fail(ErrorFactory::value("missing ')' in parenthesized expression"));
                 return nullptr;
             }
             advance();
-            --depth_;  // 退出括号嵌套
             return inner;
         }
         case TokenKind::End:

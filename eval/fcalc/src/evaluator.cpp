@@ -1,7 +1,8 @@
 #include "fcalc/evaluator.h"
 
+#include "text_util.h"
+
 #include <cmath>
-#include <cctype>
 #include <cstdlib>
 
 namespace fcalc {
@@ -91,18 +92,6 @@ bool apply_comparison(TokenKind op, int c) {
         case TokenKind::Greater: return c > 0;
         default: return c >= 0;  // GreaterEq
     }
-}
-
-std::string trim(const std::string& s) {
-    const std::size_t first = s.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos) return "";
-    const std::size_t last = s.find_last_not_of(" \t\r\n");
-    return s.substr(first, last - first + 1);
-}
-
-std::string to_upper(std::string s) {
-    for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    return s;
 }
 
 // 非公式单元格内容 → 字面量：数字 / TRUE / FALSE / 其余按字符串。
@@ -380,9 +369,20 @@ Value Evaluator::eval_cell(const std::string& ref, int depth, VisitedSet& visiti
     }
 
     if (content[0] == '=') {  // 单元格内是公式 → 递归求值
-        const ParseResult parsed = parse_formula(content);
-        if (!parsed.ok) return Value::error(parsed.error);
-        return eval_expr(*parsed.expr, ref, next, visiting);
+        // 解析缓存：以公式原文为键复用共享只读 AST，避免范围求值（如 =SUM(A1:A100)）
+        // 对同一单元格公式重复做完整词法+语法分析。内容每次重新读取，缓存键即内容本身，
+        // Sheet 修改后自然反映新状态；解析失败的公式不缓存（每次重试，保持既有行为）。
+        std::shared_ptr<const Expr> expr;
+        const auto it = parse_cache_.find(content);
+        if (it != parse_cache_.end()) {
+            expr = it->second;
+        } else {
+            const ParseResult parsed = parse_formula(content);
+            if (!parsed.ok) return Value::error(parsed.error);
+            expr = parsed.expr;
+            parse_cache_.emplace(content, expr);
+        }
+        return eval_expr(*expr, ref, next, visiting);
     }
     return interpret_literal(content);  // 单元格内是原始字面量
 }

@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>C++ 代码审查报告</title>
+<style>
+:root{
+  --bg:#f6f7f9; --card:#fff; --ink:#1a1d21; --muted:#6b7280; --line:#e5e7eb;
+  --blocker:#dc2626; --major:#ea580c; --minor:#ca8a04; --nit:#6b7280;
+  --accept:#16a34a; --discuss:#2563eb; --reject:#9ca3af; --accent:#2563eb;
+}
+*{box-sizing:border-box}
+html{overflow-x:clip}
+body{margin:0;font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--ink);font-size:14px;line-height:1.65}
+.wrap{max-width:960px;margin:0 auto;padding:24px 16px 120px}
+header h1{font-size:22px;margin:0 0 4px}
+.meta{color:var(--muted);font-size:13px;margin-bottom:12px}
+.summary{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:12px;white-space:pre-wrap}
+.hint{background:#eef4ff;border:1px solid #c7d8ff;border-radius:10px;padding:10px 14px;font-size:13px;margin:12px 0}
+.toolbar{position:sticky;top:0;z-index:30;background:var(--bg);margin:0 calc(50% - 50vw);padding:10px calc(50vw - 50%);border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:8px;align-items:center;transform:translateZ(0)}
+.chip{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:4px 12px;cursor:pointer;font-size:13px}
+.chip.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+.prog{margin-left:auto;font-size:13px;color:var(--muted)}
+button.act{border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:8px;padding:6px 14px;cursor:pointer;font-size:13px}
+button.act.ghost{background:var(--card);color:var(--accent)}
+h2{font-size:16px;margin:20px 0 8px}
+.pattern{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin-bottom:10px}
+.pattern b{display:block;margin-bottom:4px}
+.pattern .ex{color:var(--muted);font-size:12.5px;margin-top:4px}
+.card{background:var(--card);border:1px solid var(--line);border-left-width:4px;border-radius:10px;padding:14px 16px;margin-bottom:12px}
+.card.s-blocker{--sev:var(--blocker);border-left-color:var(--sev)}
+.card.s-major{--sev:var(--major);border-left-color:var(--sev)}
+.card.s-minor{--sev:var(--minor);border-left-color:var(--sev)}
+.card.s-nit{--sev:var(--nit);border-left-color:var(--sev)}
+.card.v-accept,.card.v-discuss,.card.v-custom{outline:2px solid var(--sev)}
+.card.v-reject{opacity:.55}
+.fid{position:relative;display:inline-block;font-family:Consolas,monospace;font-weight:700;font-size:15px;color:#fff;background:var(--sev,#334155);border-radius:6px;padding:1px 8px;margin-right:8px;cursor:pointer;user-select:none;vertical-align:1px}
+.fid:hover{filter:brightness(1.12)}
+.fid::after{content:"点击复制";position:absolute;left:50%;top:-24px;transform:translateX(-50%);background:#111827;color:#fff;font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;font-size:11px;font-weight:400;padding:2px 8px;border-radius:4px;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .15s;z-index:6}
+.fid:hover::after{opacity:1}
+.fid.copied::after{content:"已复制 ✓";opacity:1}
+.sev{display:inline-block;font-size:12px;font-weight:600;border-radius:6px;padding:1px 8px;color:#fff}
+.sev.blocker{background:var(--blocker)}
+.sev.major{background:var(--major)}
+.sev.minor{background:var(--minor)}
+.sev.nit{background:var(--nit)}
+.loc{font-family:Consolas,monospace;font-size:12.5px;color:var(--muted);margin-left:8px}
+.card h3{font-size:15px;margin:8px 0 6px}
+.card .why{margin:4px 0}
+.card .fix{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:8px 10px;margin:6px 0}
+.card .fix b{color:var(--accept)}
+.verdicts{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.vbtn{border:1px solid var(--line);background:var(--card);border-radius:8px;padding:5px 14px;cursor:pointer;font-size:13px}
+.vbtn.accept.on{background:var(--accept);border-color:var(--accept);color:#fff}
+.vbtn.reject.on{background:var(--reject);border-color:var(--reject);color:#fff}
+.vbtn.discuss.on{background:var(--discuss);border-color:var(--discuss);color:#fff}
+.vbtn.custom.on{background:#7c3aed;border-color:#7c3aed;color:#fff}
+.comment{width:100%;margin-top:8px;border:1px solid var(--line);border-radius:8px;padding:8px;font:inherit;min-height:44px;resize:vertical;background:#fafafa}
+.hidden{display:none!important}
+footer.note{color:var(--muted);font-size:12.5px;margin-top:24px}
+#modal{position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:100}
+#modal .box{background:#fff;border-radius:12px;padding:16px;max-width:640px;width:92%}
+#modal textarea{width:100%;height:300px;font-family:Consolas,monospace;font-size:12px;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>C++ 代码审查报告</h1>
+  <div class="meta" id="meta"></div>
+  <div class="summary" id="summary"></div>
+  <div class="hint">逐项选择处理方式（可加意见；只写意见未点按钮的项会按「待讨论」随反馈一起导出），完成后点「<b>导出反馈 JSON</b>」，把下载的文件放回本报告同目录；然后在你的编码 agent（ZCode / Claude Code / DeepSeek 等能加载本 skill 的工具）里说：<b>处理审查反馈，按反馈修复</b>（反馈文件即刚导出的 JSON，文件名见上方元信息）。刷新页面不丢已填内容（本地自动保存）。</div>
+</header>
+<div class="toolbar">
+  <span style="font-size:13px;color:var(--muted)">严重度</span>
+  <span id="sevchips"></span>
+  <select id="stfilter" class="chip" style="padding:4px 8px">
+    <option value="">全部状态</option>
+    <option value="none">未处理</option>
+    <option value="accept">已采纳</option>
+    <option value="reject">已驳回</option>
+    <option value="discuss">待讨论</option>
+    <option value="custom">已自定义</option>
+  </select>
+  <span class="prog" id="prog"></span>
+  <button class="act" id="btn-export">导出反馈 JSON</button>
+  <button class="act ghost" id="btn-copy">复制反馈 JSON</button>
+</div>
+<main>
+  <div id="systemic-sec" class="hidden">
+    <h2>系统性模式</h2>
+    <div id="systemic"></div>
+  </div>
+  <h2>发现明细（<span id="fcount"></span>）</h2>
+  <div id="findings"></div>
+</main>
+<footer class="note" id="genat"></footer>
+</div>
+<div id="modal" class="hidden">
+  <div class="box">
+    <b>反馈 JSON（剪贴板不可用，请手动全选复制）</b>
+    <textarea id="modal-ta" readonly></textarea>
+    <div style="text-align:right;margin-top:8px"><button class="act ghost" id="modal-close">关闭</button></div>
+  </div>
+</div>
+<script id="review-data" type="application/json">{
+ "review": {
+  "repo": "eval/logpipe",
+  "scope": "whole repo（12 文件 / 1597 行，双盲实现 + 2 轮迭代）",
+  "coverage": "覆盖：4 个维度批次（所有权/错误处理、并发/生命周期、一致性 §L/§M、头文件/魔数/构建）由 4 个独立 subagent 分头深读，主 agent 逐批抽查核实；未覆盖：性能维度（§6 未派发，LogParser 每行 std::regex 的吞吐成本仅记录未评估）、未实际编译运行、logpipe.conf 键值与代码边界的一致性抽查",
+  "date": "2026-09-05",
+  "generated_at": "2026-09-05 17:19:53",
+  "report_name": "code-review-report.html",
+  "feedback_file": "code-review-report-feedback.json",
+  "findings_file": "F:/workspace/claude_playground/skill/c++program/eval/logpipe/code-review-findings.json"
+ },
+ "summary": "logpipe 整体架构清晰：util 封装层被墙钟读取全面遵守、并发骨架（有界队列+双线程）经逐点核查无竞态、tail 续读/轮转/限流的状态机总体正确。最需要关注的三件事：一是 tailer.cpp 的 poll_file 在首次读到 EOF 后不清 failbit，导致文件追加的内容永远采集不到（tail 核心功能缺陷，Major）；二是 stdin 阻塞读使优雅停机可能卡死在 join 且二次 Ctrl-C 无逃生通道；三是时间读取约定（util.h 声明 MUST 走 util）被 tailer.cpp 的 steady_clock 直调打破，且大小写折叠/推送超时等小设施存在多处并行实现。修复轮将按 TDD-LOOP 处理行为类问题。",
+ "systemic": [
+  {
+   "id": "S1",
+   "title": "无名字面量（魔数）散布在限流窗口、枚举基数、队列容量与退出码中",
+   "count": 11,
+   "examples": [
+    "include/pipeline.h:235 (窗口 1000)",
+    "include/pipeline.h:296 (level_counts_[5])",
+    "src/main.cpp:64 (队列 1024)",
+    "src/main.cpp:45-175 (退出码 2/3/4)",
+    "src/config.cpp:107-132 (校验边界)"
+   ],
+   "recommendation": "为每处建立具名 constexpr 常量（kWindowMs、kLevelCount、kQueueCapacity、kExit*、各校验边界），单位写进名字；一次 PR 按 S1 逐点替换。"
+  }
+ ],
+ "findings": [
+  {
+   "id": "F1",
+   "severity": "Major",
+   "category": "错误处理",
+   "file": "src/tailer.cpp",
+   "line": 154,
+   "title": "poll_file 不清 failbit：首次读到 EOF 后追加的数据永远读不到（tail 功能失效）",
+   "detail": "istream::read 短读（读到 EOF）会同时置 eofbit|failbit，而 sentry 在流非 good 时直接失败，后续 read 全部空操作。poll_file 循环内没有 clear()，ensure_open 只查 is_open()，handle_truncation 只在文件变小时重建——首次读到底之后，文件新增的行永远采集不到，直到截断或重启。审查批已用最小复现程序实验证实。",
+   "fix": "poll_file 循环内每次 read 前调用 file.stream.clear()（清除上一轮遗留的 eofbit/failbit），并补一个『写文件→读到 EOF→追加→应能读到新行』的回归单测。"
+  },
+  {
+   "id": "F2",
+   "severity": "Minor",
+   "category": "并发/停机活性",
+   "file": "src/main.cpp",
+   "line": 147,
+   "title": "优雅停机可能无限期阻塞在 stdin_thread.join()，第二次 Ctrl-C 无逃生通道",
+   "detail": "stdin 读线程阻塞在 getline 时不观察 stop_；配了文件源时主线程会卡在 join()，仅 stdin 源时队列永不关闭、主循环空转。信号处理器只置 g_stop，主线程已离开循环后二次信号无人检查——交互式终端下表现为 Ctrl-C 后假死（stdin_reader.h 已注释为已知限制，但缺强制退出手段）。",
+   "fix": "双管齐下：begin_shutdown 中关闭底层 stdin 句柄（Windows _close(0)/POSIX ::close(0)）解除阻塞读；handle_stop_signal 检测 g_stop 已为 true 时直接 std::_Exit(0) 兜底。"
+  },
+  {
+   "id": "F3",
+   "severity": "Minor",
+   "category": "错误处理",
+   "file": "src/writer.cpp",
+   "line": 190,
+   "title": "close() 的 flush 失败未检查：末尾缓冲日志可能静默丢失而退出码仍为 0",
+   "detail": "write() 的 good() 检查时数据多半还在流缓冲区，真正落盘发生在 close() 的 flush()；flush/close 失败不检查，main 按 write_failures==0 报 'run finished' 并返回 0。",
+   "fix": "close() 内 flush 后检查流状态，失败则 log_error 并记失败标志（新增 bool failed() const），main 据此置退出码 4。"
+  },
+  {
+   "id": "F4",
+   "severity": "Minor",
+   "category": "错误处理",
+   "file": "src/config.cpp",
+   "line": 107,
+   "title": "rotate.size_bytes 负值经 stoull 回绕成巨大值，绕过下界校验静默禁用轮转",
+   "detail": "stoull 会完整消费 '-5' 并回绕为约 1.8e19（已实验验证），rotate.size_bytes 只有 '< 256' 下界检查，回绕值通过校验后 max_bytes_ 极大、轮转被静默禁用；与源码注释『负数会被范围检查兜住』的声明矛盾。",
+   "fix": "parse_u64 解析前拒绝带符号输入（首字符 '-'/'+' 直接 throw），或补上界检查（> 1<<40 抛错）。"
+  },
+  {
+   "id": "F5",
+   "severity": "Minor",
+   "category": "所有权",
+   "file": "src/main.cpp",
+   "line": 90,
+   "title": "主循环与线程 join 之间无异常屏障：异常穿透会 std::terminate 并丢失最终 offset 检查点",
+   "detail": "主循环内 parse/write/metrics 插表等均可抛异常（如 bad_alloc）；异常越过 joinable 的 std::thread 对象时析构直接 terminate，tailer.run() 的收尾 save_offsets() 不执行，重启后按旧 offset 重复采集整段数据。",
+   "fix": "把主循环到 writer.close() 包进 try/catch，异常路径落入既有 request_stop/join/close 清理序列后以非零码退出。"
+  },
+  {
+   "id": "F6",
+   "severity": "Minor",
+   "category": "所有权",
+   "file": "src/tailer.cpp",
+   "line": 161,
+   "title": "pending 缓冲无上限：无换行的超长单行（JSON 日志常见）会把整个文件读进内存直至 OOM",
+   "detail": "poll_file 把每次读到的字节全部 append 进 pending、只按 '\\n' 切分且 offset 不计入未完结行；GB 级无换行内容会让 pending 无界增长，截断检测也拦不住仍在增长的文件。",
+   "fix": "设 kMaxPendingBytes（如 16MB）上限：超限时告警、丢弃当前 pending 并把 offset 跳到文件末尾（或下一个换行处），避免单条异常行拖垮进程。"
+  },
+  {
+   "id": "F7",
+   "severity": "Minor",
+   "category": "一致性-M",
+   "file": "src/tailer.cpp",
+   "line": 197,
+   "title": "tailer.cpp 直调 std::chrono::steady_clock（3 处），绕过 util.h『时间读取必须走 util』的团队约定",
+   "detail": "util.h 头注释约定所有时间读取必须走 util 模块；墙钟 9 处全部经 util::now_ms，唯一直调时钟类的是 tailer 的 steady_clock（197/206/210，offset 落盘间隔与轮询计时）。用途属单调钟区间测量、用法本身正确，但 util 没有单调钟封装，约定在此出现唯一裂缝；同理 run.duration_sec 判断与 Metrics::summary 的 uptime 用墙钟测量，时钟跳变会偏移。",
+   "fix": "util 增加 int64_t steady_now_ms()（单调钟，注释标明仅用于区间测量）；tailer 三处与 uptime/duration 判断改走该封装，墙钟只保留给绝对时间戳场合。"
+  },
+  {
+   "id": "F8",
+   "severity": "Minor",
+   "category": "一致性-M",
+   "file": "include/pipeline.h",
+   "line": 40,
+   "title": "ASCII 大小写折叠 5 套手写实现并存（util/config/pipeline 三个模块）",
+   "detail": "level_from_string 大写循环、output_format_from_string 小写循环、LogFilter::to_lower+重建、config to_lower(string)、diag_level_from_string 大写循环——方向与形态各自漂移，行为目前一致但任何 Locale 层面修正需改 5 处。",
+   "fix": "util 提供 ascii_to_lower(const std::string&)（及按字符版），5 处全部改走统一实现。"
+  },
+  {
+   "id": "F9",
+   "severity": "Minor",
+   "category": "一致性-M",
+   "file": "src/tailer.cpp",
+   "line": 20,
+   "title": "kPushTimeoutMs 在 tailer.cpp 与 stdin_reader.cpp 重复定义（含相同注释）",
+   "detail": "两处 constexpr int kPushTimeoutMs = 200 各自定义，改其一则两个输入源的关停节奏静默分叉。",
+   "fix": "移到 pipeline.h BlockingQueue 旁（inline constexpr），两处删除本地定义。"
+  },
+  {
+   "id": "F10",
+   "severity": "Minor",
+   "category": "一致性-L",
+   "file": "src/config.cpp",
+   "line": 112,
+   "title": "配置键两种命名风格并存：12 个点分层级键 vs 3 个扁平键（output_format/max_lines_per_sec/stop_file）",
+   "detail": "点分风格占主导，output_format 与同域的 output.dir/output.file 风格不同，用户按层级直觉猜键会失败；logpipe.conf 两种都出现。",
+   "fix": "统一为点分层级（output.format、rate.max_lines_per_sec、run.stop_file），解析端保留旧键作一个过渡期别名，logpipe.conf 与文档标注 canonical 键名。"
+  },
+  {
+   "id": "F11",
+   "severity": "Minor",
+   "category": "一致性-L",
+   "file": "include/pipeline.h",
+   "line": 86,
+   "title": "json_lines 的 ts 字段形态不统一：parsed 行原样透传、RAW 行归一化，机器消费面按来源分裂",
+   "detail": "timestamp_text 对解析行是源行原样（'T' 分隔、小数位 1-6 可变），RAW 行才是归一化格式；text 面向人可接受，json_lines 面向机器，严格解析器会按来源分裂。",
+   "fix": "先在 writer.h 固化 ts 字段契约（文档层面）；若下游需要稳定格式，json_lines 面将 ts 归一化、原文移入 raw_ts 字段。"
+  },
+  {
+   "id": "F12",
+   "severity": "Minor",
+   "category": "一致性-L",
+   "file": "src/writer.cpp",
+   "line": 150,
+   "title": "text 行的结构化字段 |crc= 排在自由文本 message 之后，解析契约未固化",
+   "detail": "crc 必须覆盖 message 前缀所以只能排在最后（语义约束），但 message 可含任意空格与 'key=' 字样，朴素解析器用 first-match 切分会错；缓解因素是 crc 恒为行尾定宽 14 字节。",
+   "fix": "不改布局，在 writer.h 固化解析契约：取行尾锚定的最后一个 ' |crc='，其后必须恰为 8 位十六进制到行尾，禁止 first-match 切分，并给出示例。"
+  },
+  {
+   "id": "F13",
+   "severity": "Minor",
+   "category": "一致性-L",
+   "file": "include/pipeline.h",
+   "line": 284,
+   "title": "运行汇总的标签列对齐被 'lines rate-dropped' 一行破坏（列结构不一致）",
+   "detail": "块内其他标签统一填到 15 列后接 ': '，该行标签 18 列导致值列右移，按列截取的脚本会错位。",
+   "fix": "改短标签 'lines dropped   : ' 或块内统一填充到 19 列。"
+  },
+  {
+   "id": "F14",
+   "severity": "Minor",
+   "category": "一致性-L",
+   "file": "src/main.cpp",
+   "line": 44,
+   "title": "诊断消息前缀分叉：config 内部两种形态 + main.cpp 11 条无前缀，偏离 'module: message' 主导约定",
+   "detail": "tailer:/writer:/stdin reader: 前缀统一，但 config 警告走 'config <path>:<line>:' 而 throw 走 \"config: 'key'\"（grep 'config: ' 漏掉警告行），main.cpp 全部消息无前缀。",
+   "fix": "统一为 'logpipe: '（main）与 'config: <path>:<line>: '（config），.throw 消息保持 'config: ' 开头对齐。"
+  },
+  {
+   "id": "F15",
+   "severity": "Minor",
+   "category": "头文件",
+   "file": "include/config.h",
+   "line": 10,
+   "title": "config.h 仅为 Level/OutputFormat 两个枚举包含 pipeline.h，把 regex/mutex/sstream 等实现拖入所有消费者",
+   "detail": "注释自证只为了 Level；pipeline.h 同文件还有 BlockingQueue/LogParser/Metrics 等完整实现，等于包含 config.h 的每个翻译单元都编译依赖整条流水线实现。流水线各阶段共置本身合法，问题是共享『词汇表』枚举没有独立于实现。",
+   "fix": "把 Level/OutputFormat 及其字符串互转抽到叶头文件 levels.h（仅依赖 <string>），pipeline.h 与 config.h 改为包含它。"
+  },
+  {
+   "id": "F16",
+   "severity": "Minor",
+   "category": "错误处理",
+   "file": "src/main.cpp",
+   "line": 88,
+   "title": "std::signal 返回值未检查：注册失败时优雅停机静默失效",
+   "detail": "SIG_ERR 未检查；注册失败则 Ctrl-C 走默认处置直接杀死进程，save_offsets 最终检查点不执行。",
+   "fix": "检查返回值，失败时 log_warn('graceful stop disabled')，不阻断启动。"
+  },
+  {
+   "id": "F17",
+   "severity": "Nit",
+   "category": "魔数",
+   "file": "include/pipeline.h",
+   "line": 235,
+   "title": "S1 聚合：限流窗口 1000、level_counts_[5]×2 处、队列 1024、秒转毫秒 1000、pop 超时 200、退出码 2/3/4、config 各校验边界均为无名字面量",
+   "detail": "见 S1：单位与契约无名，改值需逐处搜索；level_counts_[5] 与 Level 枚举强耦合，加级别会静默漏统计/越界。",
+   "fix": "按 S1 建议逐点替换为具名 constexpr（kWindowMs/kLevelCount/kQueueCapacity/kExit*/kMinRotateSizeBytes 等），一次 PR 收敛。"
+  },
+  {
+   "id": "F18",
+   "severity": "Nit",
+   "category": "构建卫生",
+   "file": "src/CMakeLists.txt",
+   "line": 18,
+   "title": "构建加固建议（去留由用户决定）：未开 warnings-as-errors；未启用任何加固/sanitizer",
+   "detail": "已开 /W4 /permissive- 与 -Wall -Wextra -Wpedantic（基础良好）；缺 -Werror//WX（零运行时代价，新告警不进 CI）、缺 /sdl、/guard:cf、-fstack-protector-strong、_GLIBCXX_ASSERTIONS（~0-3%，通常可忽略）、dev/CI 可选 -fsanitize=address,undefined（代价高：ASan 约 2x CPU / 2-3x 内存，绝不上 release）。是否开启由你决定。",
+   "fix": "如决定开启：第一方目标加 /WX 或 -Werror（窄口径 -Werror=return-type 亦可）；用 check_cxx_compiler_flag() 逐项探测后追加加固项；sanitizer 仅挂 Debug/CI 预设。"
+  },
+  {
+   "id": "F19",
+   "severity": "Nit",
+   "category": "god function",
+   "file": "src/main.cpp",
+   "line": 108,
+   "title": "main() 约 140 行：装配、主循环、收尾报告混在一个函数体",
+   "detail": "主循环 120-138 行混合编排与具体策略（parse→限流→过滤→写出），无法脱离进程单独测试；按漂移模式后续特性会继续往这里堆。已有 begin_shutdown 提取，尚可读。",
+   "fix": "提取 poll_stop_reason(...) 与 process_record(...) 两个辅助函数，main 只剩编排；装配段可提为 setup 函数。"
+  }
+ ]
+}</script>
+<script>
+(function(){
+"use strict";
+var DATA=JSON.parse(document.getElementById("review-data").textContent);
+var REV=DATA.review||{};
+var FINDINGS=DATA.findings||[];
+var SYSTEMIC=DATA.systemic||[];
+var ORDER={Blocker:0,Major:1,Minor:2,Nit:3};
+var VLABEL={accept:"采纳修复",reject:"驳回",discuss:"待讨论",custom:"自定义"};
+var COMMENT_PH="意见（可选）：补充上下文、为什么驳回、修复边界…";
+var CUSTOM_PH="自定义处理方式（必填）：写明你的决定或方案，agent 会按此执行…";
+var KEY="cppcr:"+(REV.repo||"")+":"+(REV.date||"")+":"+FINDINGS.length;
+var state={verdicts:{},comments:{}};
+try{
+  var saved=JSON.parse(localStorage.getItem(KEY)||"null");
+  if(saved&&saved.verdicts){state.verdicts=saved.verdicts;state.comments=saved.comments||{};}
+}catch(e){}
+
+function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
+function save(){try{localStorage.setItem(KEY,JSON.stringify(state));}catch(e){}}
+
+FINDINGS.sort(function(a,b){
+  var da=(ORDER[a.severity]!==undefined?ORDER[a.severity]:9);
+  var db=(ORDER[b.severity]!==undefined?ORDER[b.severity]:9);
+  if(da!==db)return da-db;
+  var d=String(a.file).localeCompare(String(b.file));
+  if(d)return d;
+  return (a.line||0)-(b.line||0);
+});
+
+document.title="C++ 代码审查报告 — "+(REV.repo||"");
+document.getElementById("meta").textContent=[REV.repo,REV.scope,REV.date].filter(Boolean).join(" · ");
+document.getElementById("summary").textContent=DATA.summary||"(无总体评估)";
+document.getElementById("genat").textContent="生成时间 "+(REV.generated_at||"")+" · 反馈导出文件名："+(REV.feedback_file||"code-review-report-feedback.json");
+
+var sevF="",stF="";
+var chips=document.getElementById("sevchips");
+function chip(label,val){
+  var b=document.createElement("button");
+  b.className="chip"+(val===""?" on":"");
+  b.textContent=label;
+  b.onclick=function(){
+    sevF=val;
+    chips.querySelectorAll(".chip").forEach(function(x){x.classList.remove("on");});
+    b.classList.add("on");
+    applyFilters();
+  };
+  chips.appendChild(b);
+}
+chip("全部","");
+var present=[];
+FINDINGS.forEach(function(f){if(present.indexOf(f.severity)<0)present.push(f.severity);});
+present.sort(function(a,b){return (ORDER[a]!==undefined?ORDER[a]:9)-(ORDER[b]!==undefined?ORDER[b]:9);});
+present.forEach(function(s){chip(s,s);});
+
+if(SYSTEMIC.length){
+  document.getElementById("systemic-sec").classList.remove("hidden");
+  document.getElementById("systemic").innerHTML=SYSTEMIC.map(function(p){
+    return '<div class="pattern"><b><span class="fid" data-copy="'+esc(p.id||"")+'" title="点击复制编号">'+esc(p.id||"")+"</span>"+esc(p.title)+(p.count?"（"+esc(p.count)+" 处）":"")+"</b>"
+      +(p.recommendation?"<div>"+esc(p.recommendation)+"</div>":"")
+      +((p.examples&&p.examples.length)?"<div class='ex'>示例："+esc(p.examples.join("、"))+"</div>":"")
+      +"</div>";
+  }).join("");
+}
+
+function cardHtml(f){
+  var v=state.verdicts[f.id]||"";
+  var btns=["accept","reject","discuss","custom"].map(function(k){
+    return '<button class="vbtn '+k+(v===k?" on":"")+'" data-v="'+k+'">'+VLABEL[k]+"</button>";
+  }).join("");
+  return '<div class="card s-'+f.severity.toLowerCase()+' v-'+(v||"none")+'" data-id="'+esc(f.id)+'" data-sev="'+esc(f.severity)+'">'
+    +'<div><span class="fid" data-copy="'+esc(f.id)+'" title="点击复制编号">'+esc(f.id)+"</span>"
+    +'<span class="sev '+f.severity.toLowerCase()+'">'+esc(f.severity)+"</span>"
+    +'<span class="loc">'+esc(f.file)+(f.line?":"+f.line:"")+(f.category?" · "+esc(f.category):"")+"</span></div>"
+    +"<h3>"+esc(f.title)+"</h3>"
+    +(f.detail?"<div class='why'>"+esc(f.detail)+"</div>":"")
+    +(f.fix?"<div class='fix'><b>建议修复：</b>"+esc(f.fix)+"</div>":"")
+    +'<div class="verdicts">'+btns+"</div>"
+    +'<textarea class="comment" placeholder="'+COMMENT_PH+'">'+esc(state.comments[f.id]||"")+"</textarea>"
+    +"</div>";
+}
+var fc=document.getElementById("findings");
+fc.innerHTML=FINDINGS.map(cardHtml).join("");
+document.getElementById("fcount").textContent=FINDINGS.length+" 项";
+
+fc.addEventListener("click",function(e){
+  var btn=e.target.closest?e.target.closest(".vbtn"):null;
+  if(!btn)return;
+  var card=btn.closest(".card");
+  var id=card.dataset.id,v=btn.dataset.v;
+  state.verdicts[id]=(state.verdicts[id]===v)?"":v;
+  card.querySelectorAll(".vbtn").forEach(function(b){b.classList.toggle("on",state.verdicts[id]===b.dataset.v);});
+  card.classList.remove("v-accept","v-reject","v-discuss","v-custom","v-none");
+  card.classList.add("v-"+(state.verdicts[id]||"none"));
+  var ta=card.querySelector(".comment");
+  if(ta)ta.placeholder=(state.verdicts[id]==="custom")?CUSTOM_PH:COMMENT_PH;
+  if(state.verdicts[id]==="custom"&&ta)ta.focus();
+  save();updateProg();applyFilters();
+});
+fc.addEventListener("input",function(e){
+  if(!e.target.classList||!e.target.classList.contains("comment"))return;
+  state.comments[e.target.closest(".card").dataset.id]=e.target.value;
+  save();
+});
+
+document.getElementById("stfilter").addEventListener("change",function(e){stF=e.target.value;applyFilters();});
+
+function effStatus(id){
+  var v=state.verdicts[id];
+  if(v)return v;
+  return (state.comments[id]||"").trim()?"discuss":"";
+}
+function updateProg(){
+  var decided=0;
+  FINDINGS.forEach(function(f){if(effStatus(f.id))decided++;});
+  document.getElementById("prog").textContent="已处理 "+decided+" / "+FINDINGS.length;
+}
+function applyFilters(){
+  updateProg();
+  document.querySelectorAll("#findings .card").forEach(function(card){
+    var id=card.dataset.id;
+    var okSev=(!sevF)||card.dataset.sev===sevF;
+    var eff=effStatus(id);
+    var okSt=(!stF)||(stF==="none"?!eff:eff===stF);
+    card.classList.toggle("hidden",!(okSev&&okSt));
+  });
+}
+
+function buildFeedback(){
+  var verdicts={};
+  FINDINGS.forEach(function(f){
+    var v=state.verdicts[f.id];
+    var c=state.comments[f.id]||"";
+    if(!v&&!c.trim())return;
+    verdicts[f.id]={verdict:v||"discuss",comment:c,severity:f.severity,
+                    file:f.file,line:f.line||null,title:f.title,fix:f.fix||""};
+  });
+  return {report:REV.report_name||"",findings_file:REV.findings_file||"",repo:REV.repo||"",
+          scope:REV.scope||"",exported_at:new Date().toISOString(),
+          total_findings:FINDINGS.length,decided:Object.keys(verdicts).length,verdicts:verdicts};
+}
+function feedbackText(){return JSON.stringify(buildFeedback(),null,2);}
+function showModal(t){
+  document.getElementById("modal-ta").value=t;
+  document.getElementById("modal").classList.remove("hidden");
+  document.getElementById("modal-ta").select();
+}
+function flash(msg){
+  var b=document.getElementById("btn-export"),old=b.textContent;
+  b.textContent=msg;
+  setTimeout(function(){b.textContent=old;},1400);
+}
+document.getElementById("btn-export").onclick=function(){
+  var name=REV.feedback_file||"code-review-report-feedback.json";
+  var blob=new Blob([feedbackText()],{type:"application/json"});
+  var a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);a.download=name;
+  document.body.appendChild(a);a.click();
+  setTimeout(function(){URL.revokeObjectURL(a.href);a.remove();},500);
+  flash("已导出 ✓");
+};
+document.getElementById("btn-copy").onclick=function(){
+  var t=feedbackText();
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(t).then(function(){flash("已复制 ✓");},function(){showModal(t);});
+  }else{showModal(t);}
+};
+document.getElementById("modal-close").onclick=function(){
+  document.getElementById("modal").classList.add("hidden");
+};
+
+function fallbackCopy(t){
+  var ta=document.createElement("textarea");
+  ta.value=t;ta.style.position="fixed";ta.style.opacity="0";
+  document.body.appendChild(ta);ta.select();
+  try{document.execCommand("copy");}catch(e){}
+  ta.remove();
+}
+function copyText(t,ok){
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(t).then(ok,function(){fallbackCopy(t);ok();});
+  }else{fallbackCopy(t);ok();}
+}
+document.addEventListener("click",function(e){
+  var b=e.target.closest?e.target.closest(".fid"):null;
+  if(!b||!b.dataset.copy)return;
+  copyText(b.dataset.copy,function(){
+    b.classList.add("copied");
+    setTimeout(function(){b.classList.remove("copied");},1200);
+  });
+});
+
+applyFilters();
+})();
+</script>
+</body>
+</html>

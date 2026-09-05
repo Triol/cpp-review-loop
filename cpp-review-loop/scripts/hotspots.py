@@ -155,9 +155,12 @@ CRC_CALL_RE = re.compile(r"\b([A-Za-z_]\w*[Cc][Rr][Cc]\w*)\s*\(")
 
 # Magic numbers (checklist.md §1): two-plus-digit literals outside
 # constant-definition lines. Strings/comments already stripped; hex, decimals
-# and single-digit sentinels are not counted.
+# and single-digit sentinels are not counted. Storage prefixes (inline/static/
+# extern) before constexpr/const are allowed — namespace-scope named constants
+# use them.
 MAGIC_NUM_RE = re.compile(r"(?<![\w.\"'])(?<!0[xX])[0-9]{2,}(?![\w.])")
-CONST_DECL_RE = re.compile(r"^\s*(?:#\s*define\b|enum\b|(?:static\s+)?(?:constexpr\s+)?const\b|constexpr\b)")
+CONST_DECL_RE = re.compile(
+    r"^\s*(?:#\s*define\b|enum\b|(?:(?:inline|static|extern)\s+)*(?:constexpr\b|const\b))")
 
 # Build-file hardening signals (checklist.md §7) — measured on build files.
 BUILD_FILE_SUFFIXES = (".cmake", ".vcxproj", ".mk")
@@ -912,7 +915,8 @@ def main():
     if fam_lines:
         out.extend(fam_lines)
         out.append("          (若项目已有统一封装，直调标准库的散点即候选偏离；"
-                   "先 grep 封装名定位封装层)")
+                   "先 grep 封装名定位封装层。注意：封装模块自身实现"
+                   "（如 util.cpp）里的时钟调用也计入总数——判断前先剔除)")
     else:
         out.append("(各设施来源单一，未见绕过候选)")
 

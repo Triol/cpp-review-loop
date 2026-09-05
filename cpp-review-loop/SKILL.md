@@ -30,7 +30,7 @@ Review C++ like a senior engineer on a large team: map before judging, verify ev
 | 门 | 动作 | 产出物 |
 |---|---|---|
 | F1 读反馈 | 解析 feedback JSON（§7） | 四类 verdict 的分组清单 |
-| F2 基线 | 跑 hotspots.py 快照（§7 第 5 步） | 修复前基线计数 |
+| F2 基线 | 跑 hotspots.py 快照（§7 第 5 步） | 基线的**分节计数**（red flags / 魔数 / 封装来源 / 文件与 LOC），逐节记录备对比 |
 | F3 逐批 TDD | 每批红→绿 subagent（§7 第 6-7 步） | 每批红绿证据 + 检查点 (a)-(f) 记录 |
 | F4 复扫 | 每批检查点含被改文件复扫对比基线（第 8 步 (f)） | 对比结果（新候选当场归批解决） |
 | F5 复审 | 全项目复扫 + 不知情复审（第 9 步） | 复审结论（新问题：无 / 已修 / 留用户取舍） |

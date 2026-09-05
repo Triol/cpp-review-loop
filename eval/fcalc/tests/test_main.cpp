@@ -137,6 +137,12 @@ FC_TEST(literal_number) {
     expect_number(ev("=  7\t"), 7.0, "whitespace around literal");
 }
 
+// F3（审查修复回归）：数字字面量溢出（strtod ERANGE / inf）在词法层产出 Invalid token，
+// 走既有语法错误路径返回 #VALUE!，不绕过全库『#VALUE!=数值溢出』约定。
+FC_TEST(literal_number_overflow) {
+    expect_error(ev("=1e999"), ErrorType::Value, "=1e999 literal overflow -> #VALUE!");
+}
+
 FC_TEST(literal_string) {
     expect_string(ev("=\"hi\""), "hi", "plain string");
     expect_string(ev("=\"say \"\"hi\"\"\""), "say \"hi\"", "escaped quotes");
@@ -405,6 +411,19 @@ FC_TEST(error_parse) {
     expect_error(ev("="), ErrorType::Value, "empty formula after '='");
     expect_error(ev("42"), ErrorType::Value, "missing leading '='");
     expect_error(ev(""), ErrorType::Value, "empty text");
+}
+
+// F1（审查修复回归）：解析期括号嵌套必须有深度上限 —— 超限返回 #VALUE!
+// （detail 含 nesting），而不是递归下降栈溢出崩溃。深嵌套公式来自单元格内容、可被外部注入。
+FC_TEST(error_parse_deep_nesting) {
+    const int depth = 500;  // 远超上限（128）
+    std::string formula = "=";
+    formula.append(static_cast<std::size_t>(depth), '(');
+    formula += '1';
+    formula.append(static_cast<std::size_t>(depth), ')');
+    Value v = ev(formula);
+    expect_error(v, ErrorType::Value, "500-level nested parens -> #VALUE! (no crash)");
+    expect_detail(v, "expression nesting too deep", "nesting detail names the limit");
 }
 
 FC_TEST(error_ref) {

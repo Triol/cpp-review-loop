@@ -66,6 +66,7 @@ private:
 
     Lexer lexer_;
     Error error_{ErrorType::Value};
+    int depth_ = 0;  // 括号嵌套深度（parse_primary 的 LParen 分支维护，超限报 #VALUE!）
 };
 
 }  // namespace fcalc

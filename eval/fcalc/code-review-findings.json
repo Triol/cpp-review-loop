@@ -1,0 +1,139 @@
+{
+  "review": {
+    "repo": "eval/fcalc",
+    "scope": "whole repo（10 文件 / 2108 行，4 轮迭代 + 既有测试 harness）",
+    "coverage": "覆盖：3 个维度批次（正确性/错误处理/所有权、性能专批、一致性 §M/§L + 头文件/魔数/构建）由 3 个独立 subagent 分头深读，主 agent 抽查核实；未覆盖：并发维度（单线程库，经派发计划核对后裁定省略）、未做性能实测（发现均为调用链推定的确定性成本）、tests 断言与语义逐条核对"
+  },
+  "summary": "fcalc 的分层（lexer/parser/evaluator/中央错误工厂）清晰，ErrorFactory 约定经全库测量被遵守（0 处手写错误字面量），36 组测试覆盖充分。最需要关注的三件事：一是解析器递归下降无嵌套深度上限，单元格内容（外部可注入数据）中的深嵌套公式会在解析期栈溢出崩溃，kMaxCellDepth 防线来不及生效；二是每次单元格求值都重新做完整词法+语法分析、无任何缓存，范围聚合放大 N 倍；三是数字字面量溢出（strtod ERANGE→inf）绕过全库已测的 #VALUE! 溢出约定。性能批的其余发现均为调用链可推定的确定性成本。",
+  "systemic": [
+    {
+      "id": "S1",
+      "title": "输出契约与边界常量以无名字面量散布（1e15、%.15g、列基数 26、深度 64、容差 1e-9、网格 2/2）",
+      "count": 6,
+      "examples": ["include/fcalc/value.h:16 (1e15 与 %.15g 隐性耦合)", "src/evaluator.cpp:136 (列基数 26 三处互逆)", "tests/test_main.cpp:435 (深度边界 63/64 硬编码)"],
+      "recommendation": "逐处定义具名 constexpr（kMaxIntegralDouble、kColumnRadix、kNumberTolerance 等），深度边界用例改引 kMaxCellDepth；一次 PR 收敛。"
+    }
+  ],
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "Major",
+      "category": "健壮性/注入",
+      "file": "src/parser.cpp",
+      "line": 242,
+      "title": "递归下降解析无嵌套深度上限：深嵌套公式在解析期栈溢出，外部可注入崩溃",
+      "detail": "每层 '(' 嵌套经过约 9 层栈帧（parse_expr→…→primary→parse_expr），无深度计数；公式来自 Sheet 单元格内容（外部可注入），Windows 默认 1MB 栈下数千字符的 '=((((…' 即栈溢出崩溃——evaluator 的 kMaxCellDepth=64 防线在解析阶段来不及生效。",
+      "fix": "Parser 增加成员 depth_，parse_primary 的 LParen 分支 ++/--，超过上限（如 128）时 fail(ErrorFactory::value(\"expression nesting too deep\"))；补用例：深嵌套返回错误而非崩溃（TDD 先红：当前进程崩溃）。"
+    },
+    {
+      "id": "F2",
+      "severity": "Major",
+      "category": "性能",
+      "file": "src/evaluator.cpp",
+      "line": 383,
+      "title": "每次单元格被引用都重新做完整词法+语法分析，无 AST/结果缓存",
+      "detail": "调用链核实：eval_ref→eval_cell→parse_formula(content) 全程无缓存；=SUM(A1:A100) 一次求值触发 100 次完整解析，被 N 个公式引用放大 N 倍（清单 §6 'repeated parsing of the same input' 的直接命中）。",
+      "fix": "Evaluator 持有 std::unordered_map<std::string, std::shared_ptr<const Expr>> 解析缓存（键=单元格内容文本），eval_cell 先查缓存；ParseResult.expr 改 shared_ptr<const Expr> 共享只读树。"
+    },
+    {
+      "id": "F3",
+      "severity": "Minor",
+      "category": "正确性",
+      "file": "src/lexer.cpp",
+      "line": 57,
+      "title": "数字字面量溢出（strtod ERANGE→inf）未转 #VALUE!，绕过全库溢出约定",
+      "detail": "scan_number 不检查 errno/isfinite，'=1e999' 求值为 inf 并显示 'inf'；与 error_factory.h 的 '#VALUE!=数值溢出' 约定、算术路径的 isfinite 检查及既有测试断言不一致。",
+      "fix": "scan_number 在 strtod 后检查 errno==ERANGE 或 !isfinite，命中产出 Invalid token（或 eval 侧统一 isfinite 复查），返回 #VALUE!。"
+    },
+    {
+      "id": "F4",
+      "severity": "Minor",
+      "category": "正确性",
+      "file": "src/evaluator.cpp",
+      "line": 17,
+      "title": "try_parse_number 首字符白名单挡不住带符号 inf/nan 与十六进制（-inf/0x1F 变数值）",
+      "detail": "注释声称首字符检查可避免 inf/nan 被静默接受，但 '-inf'/'+nan' 首字符是 '-'/'+' 能过 guard 且被 strtod 接受；'0x1F' 被按十六进制解析为 31，而词法层不认十六进制——语义不一致。",
+      "fix": "完整解析成功后追加终检：!isfinite 返回 false；串内出现 'x'/'X' 返回 false（或改手写十进制扫描）。"
+    },
+    {
+      "id": "F5",
+      "severity": "Minor",
+      "category": "性能",
+      "file": "src/evaluator.cpp",
+      "line": 405,
+      "title": "范围展开对每个非空单元格做两次存储查找（expand_range 与 eval_and_or 同模式）",
+      "detail": "先 get_cell_formula 判空、eval_cell 内部再次取同一内容：每格两次 map 查找 + 两次按值 string 拷贝。",
+      "fix": "增加接受预取内容的 eval_cell 重载，展开处把已取得的 content 直接传入。"
+    },
+    {
+      "id": "F6",
+      "severity": "Minor",
+      "category": "性能",
+      "file": "include/fcalc/evaluator.h",
+      "line": 24,
+      "title": "Sheet::get_cell_formula 按值返回 std::string，每次单元格访问强制拷贝",
+      "detail": "虚接口按值返回使每次查找付出分配+拷贝；eval_cell/expand_range/eval_and_or 每次访问都付一次。",
+      "fix": "改为返回 const std::string&（MapSheet 返回 it->second，缺失返回 static 空串），契约『空=缺失』不变。"
+    },
+    {
+      "id": "F7",
+      "severity": "Minor",
+      "category": "一致性-M",
+      "file": "include/fcalc/error_factory.h",
+      "line": 24,
+      "title": "Error 构造函数为 public：『必须经 ErrorFactory 创建』的约定无编译期保证",
+      "detail": "测量：全库 0 处手写 \"#XXX\" 字面量（文本集中已达成），但 tests 直接 Error(ErrorType::Value,...) 绕过工厂、value.h/parser.h 的占位成员也是直接构造；约定仅靠注释。",
+      "fix": "Error 构造改 private + friend class ErrorFactory；占位初始化改经工厂；或按方案二在规范注释中明确豁免范围。"
+    },
+    {
+      "id": "F8",
+      "severity": "Minor",
+      "category": "一致性-M",
+      "file": "src/parser.cpp",
+      "line": 8,
+      "title": "is_digit/is_letter/to_upper 在 lexer/parser/evaluator 三模块重复实现（空白判定另有第三种形态）",
+      "detail": "逐字重复的多份字符/文本设施无单一事实来源，后续调整（非 ASCII、空白集）必然漂移——复制粘贴适应型重复。",
+      "fix": "新增内部头 src/text_util.h 集中这些助手（空白集合定义为唯一常量），三处统一包含并删除副本。"
+    },
+    {
+      "id": "F9",
+      "severity": "Nit",
+      "category": "正确性",
+      "file": "include/fcalc/value.h",
+      "line": 16,
+      "title": "format_number 对负零输出 \"-0\"（=0*-1 显示 -0 而非 0）",
+      "detail": "-0.0 进入整数分支后 snprintf(\"%.0f\") 输出 '-0'，与整数显示意图及常见表格软件不符。",
+      "fix": "整数分支前归一化（v==0.0 时提前返回 \"0\"）。"
+    },
+    {
+      "id": "F10",
+      "severity": "Nit",
+      "category": "魔数",
+      "file": "include/fcalc/value.h",
+      "line": 16,
+      "title": "S1 聚合：1e15 与 %.15g 的隐性输出契约、列基数 26（三处互逆）、测试深度边界 63/64 硬编码、容差 1e-9、网格上界 2/2、buf[40] 均无名字面量",
+      "detail": "见 S1；其中 1e15 与 15 位有效数字共同定义数字→文本契约，改动任一处需同步且无处检索。",
+      "fix": "按 S1 建议逐处定义具名 constexpr；测试深度边界改引 kMaxCellDepth。"
+    },
+    {
+      "id": "F11",
+      "severity": "Nit",
+      "category": "一致性-B",
+      "file": "src/evaluator.cpp",
+      "line": 3,
+      "title": "系统头组内未按字典序（cmath/cctype/ccstdlib），为全库唯一乱序文件",
+      "detail": "其余文件组内均有序；此处是唯一偏离（自检：catch(...) ×4 是 Sheet 异常隔离的合法用法，按反噪音条款不报）。",
+      "fix": "调整为 <cctype>, <cmath>, <cstdlib>。"
+    },
+    {
+      "id": "F12",
+      "severity": "Nit",
+      "category": "构建卫生",
+      "file": "CMakeLists.txt",
+      "line": 8,
+      "title": "构建建议（去留由用户决定）：add_compile_options 全局生效；无 -Werror/-Wpedantic；加固选项未启用",
+      "detail": "全局旗标随 target 增长移除难度上升；warnings-as-errors 零运行时代价（可窄口径）；加固项运行时代价 ~0-3%，sanitizer 仅限 dev/CI（ASan 约 2x CPU / 2-3x 内存，严禁上 release）。",
+      "fix": "如决定开启：改 target_compile_options 或 INTERFACE 目标；-Werror 窄口径或全量；check_cxx_compiler_flag 逐项探测加固项。"
+    }
+  ]
+}

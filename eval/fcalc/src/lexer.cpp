@@ -1,5 +1,7 @@
 #include "fcalc/lexer.h"
 
+#include <cerrno>
+#include <cmath>
 #include <cstdlib>
 
 namespace fcalc {
@@ -54,8 +56,16 @@ void Lexer::scan_number() {
         }
     }
     const std::string text = src_.substr(start, offset_ - start);
-    current_ = Token{TokenKind::Number, text, std::strtod(text.c_str(), nullptr),
-                     static_cast<int>(start)};
+    errno = 0;
+    const double value = std::strtod(text.c_str(), nullptr);
+    if (errno == ERANGE || !std::isfinite(value)) {
+        // 数值字面量溢出（如 1e999 → inf）：产出 Invalid token，走既有语法错误路径
+        // 返回 #VALUE!，不绕过全库『#VALUE! = 数值溢出』约定。
+        current_ = Token{TokenKind::Invalid, "numeric literal overflow", 0.0,
+                         static_cast<int>(start)};
+        return;
+    }
+    current_ = Token{TokenKind::Number, text, value, static_cast<int>(start)};
 }
 
 // 标识符：字母或 "$字母" 开头的字母数字串，内部可含 '$'（绝对引用标记，如 $A$1 / A$1）；

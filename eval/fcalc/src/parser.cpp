@@ -109,6 +109,10 @@ bool is_comparison(TokenKind k) {
     }
 }
 
+// 递归下降括号嵌套深度上限：深嵌套公式（如 "=((((…，可来自外部注入的单元格内容）
+// 会使递归下降栈溢出崩溃，超限时报 #VALUE! 而非崩溃。
+constexpr int kMaxNestingDepth = 128;
+
 }  // namespace
 
 ParseResult parse_formula(const std::string& text) {
@@ -283,14 +287,24 @@ std::unique_ptr<Expr> Parser::parse_primary() {
             return nullptr;
         }
         case TokenKind::LParen: {
+            ++depth_;  // 进入括号嵌套
+            if (depth_ > kMaxNestingDepth) {
+                fail(ErrorFactory::value("expression nesting too deep"));
+                return nullptr;
+            }
             advance();
             std::unique_ptr<Expr> inner = parse_expr();
-            if (!inner) return nullptr;
+            if (!inner) {
+                --depth_;
+                return nullptr;
+            }
             if (peek().kind != TokenKind::RParen) {
+                --depth_;
                 fail(ErrorFactory::value("missing ')' in parenthesized expression"));
                 return nullptr;
             }
             advance();
+            --depth_;  // 退出括号嵌套
             return inner;
         }
         case TokenKind::End:

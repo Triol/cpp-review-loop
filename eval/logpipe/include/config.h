@@ -10,10 +10,32 @@
 
 #include "dsl.h"       // FilterExpr (compiled filter.expr)
 #include "pipeline.h"  // Level, OutputFormat, CompressMode
+#include "transform.h" // TransformStep, TransformPosition
 #include "util.h"      // DiagLevel
 #include "writer.h"    // CompressMode
 
 namespace logpipe {
+
+// One named output of the fan-out group (requirement: multiple named outputs
+// with independent file/format/compress/filter/level/transform settings).
+// Declared via the output.<N>.name / output.<N>.file / ... config keys; the
+// indices must start at 1 and may be sparse (gaps are fine, order is by
+// index). A config without any output.<N>.* key maps its legacy single-output
+// settings onto exactly one default output named "default" (backward
+// compatibility; see Config::load).
+struct OutputConfig {
+  int index = 0;  // the N from output.<N>.* (ordering key)
+  std::string name;                 // unique; defaults to "default" / "out<N>"
+  std::string file;                 // base file name inside output.dir
+  OutputFormat format = OutputFormat::Text;
+  CompressMode compress = CompressMode::None;
+  Level level = Level::Debug;       // per-output level threshold
+  std::string filter_expr_text;     // per-output DSL expression (raw text)
+  std::shared_ptr<const dsl::FilterExpr> filter_expr;  // compiled (or null)
+  std::string transform_text;       // raw transform chain spec
+  std::vector<TransformStep> transform;  // parsed chain (empty = none)
+  TransformPosition transform_position = TransformPosition::After;
+};
 
 struct Config {
   // input.files: comma-separated list of files to tail (repeated
@@ -55,6 +77,14 @@ struct Config {
   // expression aborts startup with a positioned dsl::Error.
   std::string filter_expr_text;
   std::shared_ptr<const dsl::FilterExpr> filter_expr;
+
+  // Fan-out outputs (see OutputConfig). When the config file defines at least
+  // one output.<N>.* key, `outputs` holds the declared group and
+  // `outputs_explicit` is true (main switches to the fan-out writer). Without
+  // those keys `outputs` still holds exactly one entry built from the legacy
+  // single-output settings, so consumers can always iterate `outputs`.
+  std::vector<OutputConfig> outputs;
+  bool outputs_explicit = false;
 
   // Rate limit: lines beyond max_lines_per_sec are dropped and counted
   // separately in the metrics (0 = unlimited).

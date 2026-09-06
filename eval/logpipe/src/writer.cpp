@@ -350,8 +350,86 @@ bool PerSourceWriter::failed() const {
   return false;
 }
 
-// --------------------------- compressed file reader --------------------------
+// ------------------------------ FanOutWriter ---------------------------------
 
+FanOutWriter::FanOutWriter(std::vector<OutputRoute> routes, Metrics* metrics)
+    : routes_(std::move(routes)), metrics_(metrics) {
+  sinks_.reserve(routes_.size());
+}
+
+bool FanOutWriter::open() {
+  sinks_.clear();
+  sinks_.reserve(routes_.size());
+  for (const OutputRoute& route : routes_) {
+    // per_source_files composes with fan-out: each branch may itself be a
+    // per-source dispatcher.
+    std::unique_ptr<OutputSink> sink =
+        route.options.per_source_files
+            ? std::unique_ptr<OutputSink>(
+                  new PerSourceWriter(route.options, metrics_))
+            : std::unique_ptr<OutputSink>(
+                  new RollingWriter(route.options, metrics_));
+    if (!sink->open()) {
+      any_failed_ = true;
+      util::log_error("writer: cannot open output '" + route.name + "'");
+      return false;
+    }
+    sinks_.push_back(std::move(sink));
+  }
+  return true;
+}
+
+// Applies the route's level threshold and optional DSL expression to `work`
+// (the possibly already-transformed record). Mirrors LogFilter's semantics:
+// RAW ranks above every threshold so unparsed lines are forwarded.
+bool FanOutWriter::route_accepts(const OutputRoute& route,
+                                 LogRecord& work) const {
+  if (static_cast<int>(work.level) < static_cast<int>(route.level)) return false;
+  if (route.filter_expr && !route.filter_expr->passes(work)) return false;
+  return true;
+}
+
+bool FanOutWriter::write(const LogRecord& rec, uint64_t& bytes_written) {
+  bytes_written = 0;
+  for (size_t i = 0; i < routes_.size(); ++i) {
+    const OutputRoute& route = routes_[i];
+    LogRecord work = rec;
+    if (route.transform_position == TransformPosition::Before) {
+      work = apply_transforms(route.transform, work);
+    }
+    if (!route_accepts(route, work)) continue;
+    if (route.transform_position == TransformPosition::After) {
+      work = apply_transforms(route.transform, work);
+    }
+    uint64_t branch_bytes = 0;
+    if (!sinks_[i]->write(work, branch_bytes)) {
+      any_failed_ = true;
+      util::log_error("writer: write to output '" + route.name + "' failed");
+      return false;  // disk trouble: stop cleanly like the single sink
+    }
+    if (metrics_ != nullptr) {
+      metrics_->record_output_written(route.name, branch_bytes);
+    }
+    bytes_written += branch_bytes;
+  }
+  // A record routed to no output (every branch filtered it) is not a failure;
+  // the caller still sees bytes_written == 0.
+  return true;
+}
+
+void FanOutWriter::close() {
+  for (auto& sink : sinks_) sink->close();
+}
+
+bool FanOutWriter::failed() const {
+  if (any_failed_) return true;
+  for (const auto& sink : sinks_) {
+    if (sink->failed()) return true;
+  }
+  return false;
+}
+
+// --------------------------- compressed file reader --------------------------
 bool read_compressed_output(const std::filesystem::path& path, std::string& out) {
   out.clear();
   std::ifstream in(path, std::ios::binary);

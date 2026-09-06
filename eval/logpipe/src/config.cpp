@@ -84,6 +84,15 @@ bool parse_bool(const std::string& value, bool& out) {
   return false;
 }
 
+// Returns true when `text` is a non-empty all-digit run (fan-out indices).
+bool is_number(const std::string& text) {
+  if (text.empty()) return false;
+  for (char c : text) {
+    if (!std::isdigit(static_cast<unsigned char>(c))) return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 Config Config::load(const std::string& path) {
@@ -108,7 +117,68 @@ Config Config::load(const std::string& path) {
     const std::string key = to_lower(trim(line.substr(0, eq)));
     const std::string value = trim(line.substr(eq + 1));
 
-    if (key == "input.files" || key == "input.file") {
+    // Fan-out output group: output.<N>.<attr>. The numeric second segment
+    // distinguishes these keys from the legacy output.dir / output.file /
+    // output.compress spellings.
+    int fanout_index = -1;
+    std::string fanout_attr;
+    if (key.rfind("output.", 0) == 0) {
+      const std::string rest = key.substr(7);
+      const auto dot = rest.find('.');
+      if (dot != std::string::npos && is_number(rest.substr(0, dot))) {
+        fanout_index = parse_int("output.<N> index", rest.substr(0, dot), 1, 9999);
+        fanout_attr = to_lower(rest.substr(dot + 1));
+        config.outputs_explicit = true;
+      }
+    }
+    auto output_slot = [&, fanout_index]() -> OutputConfig& {
+      for (OutputConfig& entry : config.outputs) {
+        if (entry.index == fanout_index) return entry;
+      }
+      config.outputs.emplace_back();
+      config.outputs.back().index = fanout_index;
+      return config.outputs.back();
+    };
+
+    if (fanout_index > 0) {
+      OutputConfig& entry = output_slot();
+      if (fanout_attr == "name") {
+        entry.name = value;
+      } else if (fanout_attr == "file") {
+        entry.file = value;
+      } else if (fanout_attr == "format") {
+        if (!output_format_from_string(value, entry.format)) {
+          throw std::runtime_error(
+              "config: 'output." + std::to_string(fanout_index) +
+              ".format' expects text or json_lines, got '" + value + "'");
+        }
+      } else if (fanout_attr == "compress") {
+        if (!compress_mode_from_string(value, entry.compress)) {
+          throw std::runtime_error(
+              "config: 'output." + std::to_string(fanout_index) +
+              ".compress' expects none or rle, got '" + value + "'");
+        }
+      } else if (fanout_attr == "level") {
+        if (!level_from_string(value, entry.level) || entry.level == Level::Raw) {
+          throw std::runtime_error(
+              "config: 'output." + std::to_string(fanout_index) +
+              ".level' expects DEBUG, INFO, WARN or ERROR, got '" + value + "'");
+        }
+      } else if (fanout_attr == "filter.expr") {
+        entry.filter_expr_text = value;
+      } else if (fanout_attr == "transform") {
+        entry.transform_text = value;
+      } else if (fanout_attr == "transform.position") {
+        if (!transform_position_from_string(value, entry.transform_position)) {
+          throw std::runtime_error(
+              "config: 'output." + std::to_string(fanout_index) +
+              ".transform.position' expects before or after, got '" + value + "'");
+        }
+      } else {
+        util::log_warn("config: " + path + ":" + std::to_string(line_no) +
+                       ": unknown key '" + key + "' ignored");
+      }
+    } else if (key == "input.files" || key == "input.file") {
       for (const auto& item : split_list(value)) {
         // "stdin:" selects standard input as an extra source; anything else
         // is treated as a file path.
@@ -208,6 +278,55 @@ Config Config::load(const std::string& path) {
   if (!config.filter_expr_text.empty()) {
     config.filter_expr = dsl::FilterExpr::compile(config.filter_expr_text);
   }
+
+  // Fan-out finalization (requirement 3): a config without output.<N>.* keys
+  // maps its legacy single-output settings onto exactly one default output so
+  // consumers can always iterate Config::outputs with identical semantics.
+  if (!config.outputs_explicit) {
+    OutputConfig legacy;
+    legacy.index = 1;
+    legacy.name = "default";
+    legacy.file = config.output_base;
+    legacy.format = config.output_format;
+    legacy.compress = config.output_compress;
+    legacy.level = config.level_threshold;
+    legacy.filter_expr_text = config.filter_expr_text;
+    legacy.filter_expr = config.filter_expr;
+    config.outputs.push_back(std::move(legacy));
+  } else {
+    // Declared group: sort by index, fill defaults, check name uniqueness.
+    std::sort(config.outputs.begin(), config.outputs.end(),
+              [](const OutputConfig& a, const OutputConfig& b) {
+                return a.index < b.index;
+              });
+    std::vector<std::string> seen;
+    for (OutputConfig& entry : config.outputs) {
+      if (entry.name.empty()) entry.name = "out" + std::to_string(entry.index);
+      if (entry.file.empty()) entry.file = config.output_base;
+      for (const std::string& taken : seen) {
+        if (taken == entry.name) {
+          throw std::runtime_error("config: duplicate output name '" +
+                                   entry.name + "'");
+        }
+      }
+      seen.push_back(entry.name);
+    }
+  }
+  for (OutputConfig& entry : config.outputs) {
+    if (entry.file.empty()) {
+      throw std::runtime_error("config: output '" + entry.name +
+                               "' has an empty file name");
+    }
+    if (!entry.filter_expr_text.empty()) {
+      entry.filter_expr = dsl::FilterExpr::compile(entry.filter_expr_text);
+    }
+    try {
+      entry.transform = parse_transform_chain(entry.transform_text);
+    } catch (const std::exception& error) {
+      throw std::runtime_error(std::string("config: output '" + entry.name +
+                                           "': ") + error.what());
+    }
+  }
   return config;
 }
 
@@ -240,6 +359,25 @@ std::string Config::describe() const {
       << (offset_file.empty() ? "<off>" : offset_file.string())
       << " stop_file=" << (stop_file.empty() ? "<off>" : stop_file.string())
       << " duration_sec=" << run_duration_sec;
+  // Fan-out group dump: one bracketed entry per configured output.
+  out << " outputs=[";
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    const OutputConfig& entry = outputs[i];
+    if (i != 0) out << ", ";
+    out << entry.name << "(" << entry.file
+        << " fmt=" << output_format_name(entry.format)
+        << " compress=" << compress_mode_name(entry.compress)
+        << " level>=" << level_name(entry.level)
+        << " expr=" << (entry.filter_expr ? entry.filter_expr->text() : "<off>")
+        << " transform=" << (entry.transform.empty()
+                                 ? "<none>"
+                                 : (entry.transform_text.empty()
+                                        ? "<chain>"
+                                        : entry.transform_text))
+        << " pos=" << transform_position_name(entry.transform_position)
+        << ")";
+  }
+  out << "]";
   return out.str();
 }
 

@@ -176,6 +176,18 @@ std::string PromStatsWriter::render(const Metrics::Snapshot& snap) {
                         "source", "Output bytes per input source.",
                         source_bytes);
 
+  // --- per-output fan-out breakdowns. -----------------------------------------
+  std::vector<std::pair<std::string, uint64_t>> output_lines(
+      snap.output_written_lines.begin(), snap.output_written_lines.end());
+  emit_labelled_counter(out, std::string(kPrefix) + "output_lines_written_total",
+                        "output", "Lines written per named output.",
+                        output_lines);
+  std::vector<std::pair<std::string, uint64_t>> output_bytes(
+      snap.output_written_bytes.begin(), snap.output_written_bytes.end());
+  emit_labelled_counter(out, std::string(kPrefix) + "output_bytes_written_total",
+                        "output", "Output bytes per named output.",
+                        output_bytes);
+
   // --- KV field-value Top-N statistics. ---------------------------------------
   // Nested map iteration (key asc, then value asc) is deterministic; the
   // snapshot was already trimmed to the configured Top-N by Metrics.

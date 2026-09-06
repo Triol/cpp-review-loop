@@ -9,6 +9,7 @@ add_executable(logpipe
   prom_stats.cpp
   tailer.cpp
   stdin_reader.cpp
+  transform.cpp
   writer.cpp)
 
 target_include_directories(logpipe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)

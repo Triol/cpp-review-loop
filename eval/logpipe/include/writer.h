@@ -10,9 +10,12 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
+#include "dsl.h"       // FilterExpr (per-output DSL filter)
 #include "pipeline.h"
 #include "rle.h"
+#include "transform.h" // TransformStep, TransformPosition
 
 namespace logpipe {
 
@@ -168,5 +171,50 @@ class PerSourceWriter : public OutputSink {
 // length-prefixed RLE frames) and concatenates all decoded lines into `out`.
 // Returns false on any malformed frame. Test/round-trip helper.
 bool read_compressed_output(const std::filesystem::path& path, std::string& out);
+
+// One branch of the fan-out group (requirement 1 + 2): a named output with
+// its own sink options, level threshold, optional DSL filter expression and
+// an ordered transform chain whose position (before/after the filter) is
+// configurable. Built from an OutputConfig in main.
+struct OutputRoute {
+  std::string name;
+  WriterOptions options;         // per-output file/format/compress/rotation
+  Level level = Level::Debug;    // per-output level threshold
+  std::shared_ptr<const dsl::FilterExpr> filter_expr;  // may be null
+  std::vector<TransformStep> transform;                // ordered chain
+  TransformPosition transform_position = TransformPosition::After;
+};
+
+// Multi-output fan-out sink (requirement 1): owns one sub-sink per route and
+// offers every record to each branch independently. A record is written to a
+// branch when it passes that branch's transform-before filter (level
+// threshold plus optional DSL). When the chain position is "before" the
+// transformed record drives the filter judgement AND is the one written;
+// with "after" the filter sees the original record and the transform is
+// applied to the accepted record right before serialization.
+//
+// Metrics: every accepted write is reported as
+// Metrics::record_output_written(route name, bytes) so the per-output
+// columns (lines and bytes per output name) stay independent.
+class FanOutWriter : public OutputSink {
+ public:
+  FanOutWriter(std::vector<OutputRoute> routes, Metrics* metrics = nullptr);
+
+  bool open() override;   // opens every branch sink; false if any fails
+  bool write(const LogRecord& rec, uint64_t& bytes_written) override;
+  void close() override;
+  bool failed() const override;
+
+  // Number of configured branches (test hook).
+  size_t route_count() const { return routes_.size(); }
+
+ private:
+  bool route_accepts(const OutputRoute& route, LogRecord& work) const;
+
+  std::vector<OutputRoute> routes_;
+  std::vector<std::unique_ptr<OutputSink>> sinks_;  // parallel to routes_
+  Metrics* metrics_ = nullptr;
+  bool any_failed_ = false;
+};
 
 }  // namespace logpipe

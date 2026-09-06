@@ -152,10 +152,37 @@ int main(int argc, char** argv) {
   writer_options.compress = config.output_compress;
   writer_options.daily_rotation = config.rotate_daily;
   writer_options.per_source_files = config.per_source_files;
-  const std::unique_ptr<OutputSink> writer =
-      config.per_source_files
-          ? std::unique_ptr<OutputSink>(new PerSourceWriter(writer_options, &metrics))
-          : std::unique_ptr<OutputSink>(new RollingWriter(writer_options, &metrics));
+  std::unique_ptr<OutputSink> writer;
+  if (config.outputs_explicit) {
+    // Fan-out mode (requirement 1+2): one route per configured output, each
+    // with its own file/format/compress/level/DSL/transform settings. The
+    // rotation knobs (size, backups, daily) and the output directory stay
+    // shared with the global configuration.
+    std::vector<OutputRoute> routes;
+    routes.reserve(config.outputs.size());
+    for (const OutputConfig& entry : config.outputs) {
+      OutputRoute route;
+      route.name = entry.name;
+      route.options = writer_options;
+      route.options.base_name = entry.file;
+      route.options.format = entry.format;
+      route.options.compress = entry.compress;
+      route.level = entry.level;
+      route.filter_expr = entry.filter_expr;
+      route.transform = entry.transform;
+      route.transform_position = entry.transform_position;
+      util::log_info("logpipe: output '" + route.name + "' -> " +
+                     (config.output_dir / entry.file).string() +
+                     " (transform " +
+                     transform_position_name(route.transform_position) + ")");
+      routes.push_back(std::move(route));
+    }
+    writer = std::unique_ptr<OutputSink>(new FanOutWriter(std::move(routes), &metrics));
+  } else {
+    writer = config.per_source_files
+                 ? std::unique_ptr<OutputSink>(new PerSourceWriter(writer_options, &metrics))
+                 : std::unique_ptr<OutputSink>(new RollingWriter(writer_options, &metrics));
+  }
   if (!writer->open()) {
     util::log_error("logpipe: cannot start: output file is not writable");
     return 3;
@@ -235,7 +262,11 @@ int main(int argc, char** argv) {
         if (filter.passes(record)) {
           uint64_t bytes = 0;
           if (writer->write(record, bytes)) {
-            metrics.record_written(bytes, record.source);
+            if (bytes > 0) {
+              // Fan-out branches count themselves via record_output_written;
+              // the aggregate per-source total only counts real output bytes.
+              metrics.record_written(bytes, record.source);
+            }
           } else {
             ++write_failures;
             break;  // disk trouble: stop cleanly and keep what we have

@@ -306,6 +306,10 @@ class Metrics {
     uint64_t level_counts[kLevelCount]{};
     std::map<std::string, uint64_t> source_counts;
     std::map<std::string, uint64_t> source_written_bytes;
+    // Per-output fan-out accounting (requirement 1): written lines and bytes
+    // keyed by the configured output name.
+    std::map<std::string, uint64_t> output_written_lines;
+    std::map<std::string, uint64_t> output_written_bytes;
     std::map<std::string, std::map<std::string, uint64_t>> kv_top_values;
   };
 
@@ -335,6 +339,11 @@ class Metrics {
     {
       std::lock_guard<std::mutex> lock(source_bytes_mutex_);
       snap.source_written_bytes = source_written_bytes_;
+    }
+    {
+      std::lock_guard<std::mutex> lock(output_mutex_);
+      snap.output_written_lines = output_written_lines_;
+      snap.output_written_bytes = output_written_bytes_;
     }
     {
       std::lock_guard<std::mutex> lock(kv_mutex_);
@@ -381,6 +390,14 @@ class Metrics {
   }
   // Lines dropped because the configured rate limit was exceeded.
   void record_rate_dropped() { rate_dropped_.fetch_add(1, std::memory_order_relaxed); }
+
+  // Fan-out accounting (requirement 1): one call per record written to a
+  // named output, so each output gets its own lines/bytes columns.
+  void record_output_written(const std::string& output_name, uint64_t bytes) {
+    std::lock_guard<std::mutex> lock(output_mutex_);
+    ++output_written_lines_[output_name];
+    output_written_bytes_[output_name] += bytes;
+  }
 
   // KV extraction accounting (extract.kv = true): one record_kv_line call per
   // ingested line offered to the extractor, with `extracted` telling whether
@@ -454,6 +471,21 @@ class Metrics {
         }
       }
     }
+    {
+      std::lock_guard<std::mutex> lock(output_mutex_);
+      if (!output_written_lines_.empty()) {
+        out << "lines per output:\n";
+        for (const auto& entry : output_written_lines_) {
+          out << "  " << entry.first << ": " << entry.second << "\n";
+        }
+      }
+      if (!output_written_bytes_.empty()) {
+        out << "output bytes per output:\n";
+        for (const auto& entry : output_written_bytes_) {
+          out << "  " << entry.first << ": " << entry.second << "\n";
+        }
+      }
+    }
     if (kv_lines_attempted_.load() > 0) {
       out << "kv lines attempted : " << kv_lines_attempted_.load() << "\n"
           << "kv lines extracted : " << kv_lines_extracted_.load() << "\n"
@@ -505,6 +537,9 @@ class Metrics {
   std::map<std::string, uint64_t> source_counts_;
   mutable std::mutex source_bytes_mutex_;  // guards source_written_bytes_
   std::map<std::string, uint64_t> source_written_bytes_;
+  mutable std::mutex output_mutex_;  // guards the per-output fan-out counters
+  std::map<std::string, uint64_t> output_written_lines_;
+  std::map<std::string, uint64_t> output_written_bytes_;
   // KV extraction accounting; the (key, value) counter map feeds the Top-N
   // field-value statistics exported through the Prometheus writer.
   std::atomic<uint64_t> kv_lines_attempted_{0};

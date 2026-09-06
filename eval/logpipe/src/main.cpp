@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <string>
 #include <system_error>
@@ -13,7 +14,9 @@
 
 #include "config.h"
 #include "dsl.h"
+#include "kv_extractor.h"
 #include "pipeline.h"
+#include "prom_stats.h"
 #include "stdin_reader.h"
 #include "tailer.h"
 #include "util.h"
@@ -42,11 +45,26 @@ int main(int argc, char** argv) {
   using PopResult = BlockingQueue<RawLine>::PopResult;
 
   util::init_diag(util::DiagLevel::Info, "");  // stderr until the config is loaded
-  if (argc > 2) {
-    util::log_error("usage: logpipe [config-file]");
-    return 2;
+
+  // Command line: logpipe [config-file] [--dump-config]. The flag may appear
+  // before or after the config path; --dump-config loads the configuration
+  // (so validation errors still abort with exit code 2), prints describe()
+  // to stdout and exits 0 without touching any input or output file.
+  bool dump_only = false;
+  std::string config_path = "logpipe.conf";
+  bool config_path_seen = false;
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if (arg == "--dump-config") {
+      dump_only = true;
+    } else if (!config_path_seen) {
+      config_path = arg;
+      config_path_seen = true;
+    } else {
+      util::log_error("usage: logpipe [config-file] [--dump-config]");
+      return 2;
+    }
   }
-  const std::string config_path = (argc == 2) ? argv[1] : "logpipe.conf";
 
   Config config;
   try {
@@ -55,6 +73,16 @@ int main(int argc, char** argv) {
     util::log_error(std::string("logpipe: cannot start: ") + error.what());
     return 2;
   }
+
+  if (dump_only) {
+    const int rc = dump_config(stdout, config);
+    if (rc != 0) {
+      util::log_error("logpipe: --dump-config could not write to stdout");
+      return 5;
+    }
+    return 0;
+  }
+
   util::init_diag(config.diag_level, config.diag_file);  // apply configured sink/verbosity
   util::log_info("logpipe: starting (config: " + config_path + ")");
   util::log_debug("logpipe: config: " + config.describe());
@@ -82,6 +110,39 @@ int main(int argc, char** argv) {
   LogFilter filter(config.level_threshold, config.keyword, std::move(dsl_stage));
   RateLimiter limiter(config.max_lines_per_sec);
   Metrics metrics;
+
+  // Optional KV field extraction (extract.kv = true): runs after the rate
+  // limiter and before the filter so the DSL kv("key") syntax can use the
+  // extracted fields, and so only admitted lines are counted.
+  KvExtractor kv_extractor;
+  const bool kv_enabled = config.extract_kv;
+  if (kv_enabled) {
+    util::log_info("logpipe: KV field extraction enabled");
+  }
+
+  // Optional periodic Prometheus statistics export (stats.interval_sec > 0).
+  PromStatsOptions stats_options;
+  stats_options.dir = config.stats_dir;
+  stats_options.keep_files = config.stats_keep_files;
+  PromStatsWriter stats_writer(stats_options);
+  const int64_t stats_interval_ms =
+      static_cast<int64_t>(config.stats_interval_sec) * 1000;
+  int64_t next_stats_ms = stats_interval_ms > 0
+                              ? util::now_ms() + stats_interval_ms
+                              : 0;
+  auto maybe_export_stats = [&]() {
+    if (stats_interval_ms <= 0 || util::now_ms() < next_stats_ms) return;
+    const auto exported = stats_writer.write(metrics.snapshot(/*kv_top_n=*/10));
+    if (!exported.empty()) {
+      util::log_debug("logpipe: statistics exported to " + exported.string());
+    }
+    next_stats_ms += stats_interval_ms;  // keep the schedule drift-free
+    if (util::now_ms() > next_stats_ms) {
+      // Fell far behind (e.g. a suspended process): re-anchor on now.
+      next_stats_ms = util::now_ms() + stats_interval_ms;
+    }
+  };
+
   WriterOptions writer_options;
   writer_options.output_dir = config.output_dir;
   writer_options.base_name = config.output_base;
@@ -145,10 +206,32 @@ int main(int argc, char** argv) {
     RawLine raw;
     const PopResult popped = queue.pop_for(raw, 200);
     if (popped == PopResult::Got) {
-      const LogRecord record = parser.parse(raw.source, raw.ingested_ms, raw.text);
+      LogRecord record = parser.parse(raw.source, raw.ingested_ms, raw.text);
       metrics.record_input(record.level);
       if (limiter.allow(util::now_ms())) {
         metrics.record_source_line(record.source);
+        if (kv_enabled) {
+          // Extract "k=v" fields. First try the whole raw line (RAW records
+          // are pure key=value payloads); for parsed records fall back to the
+          // message part so timestamped lines still contribute their pairs.
+          // The record keeps whatever was found (empty for lines without the
+          // key=value shape).
+          std::map<std::string, std::string> fields;
+          bool extracted = kv_extractor.extract(raw.text, fields);
+          if (!extracted && record.parsed) {
+            // Message part first (strict), then tolerate a free-form prefix
+            // before the "k=v" payload ("evt user=bob host=web-01").
+            extracted = kv_extractor.extract(record.message, fields) ||
+                        kv_extractor.extract_tail(record.message, fields);
+          }
+          if (extracted) {
+            record.fields = std::move(fields);
+            for (const auto& pair : record.fields) {
+              metrics.record_kv_value(pair.first, pair.second);
+            }
+          }
+          metrics.record_kv_line(extracted);
+        }
         if (filter.passes(record)) {
           uint64_t bytes = 0;
           if (writer->write(record, bytes)) {
@@ -167,6 +250,11 @@ int main(int argc, char** argv) {
       break;  // reader thread(s) finished and the queue is fully drained
     }
     // PopResult::Timeout: loop around and re-evaluate the exit conditions.
+    maybe_export_stats();
+  }
+  // Final statistics export so short runs still produce a .prom file.
+  if (stats_interval_ms > 0) {
+    stats_writer.write(metrics.snapshot(/*kv_top_n=*/10));
   }
 
   tailer.request_stop();  // no-op if already stopping
@@ -200,6 +288,13 @@ int main(int argc, char** argv) {
   // Diagnostics go through the util module; this summary is the program's
   // primary report and therefore goes to stdout.
   std::cout << metrics.summary(start_ms);
+  if (kv_enabled && metrics.kv_lines_attempted() > 0) {
+    // Extraction-rate diagnostic for the KV extractor (see extract.kv).
+    std::cout << "kv extraction rate: " << metrics.kv_lines_extracted() << "/"
+              << metrics.kv_lines_attempted() << " lines ("
+              << metrics.kv_extraction_rate_percent() << "%), "
+              << metrics.kv_fields_extracted() << " field(s)\n";
+  }
   std::cout << "filter DSL      : "
             << (filter.dsl_active() ? "enabled" : "disabled") << "\n"
             << std::flush;

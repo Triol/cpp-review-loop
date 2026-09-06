@@ -8,8 +8,9 @@
 //   and_expr    := unary   ( "AND" unary )*
 //   unary       := "NOT" unary | primary
 //   primary     := "(" expr ")" | comparison
-//   comparison  := field op literal
+//   comparison  := field op literal | "kv" "(" key ")" op literal
 //   field       := "level" | "msg" | "src"
+//   key         := double-quoted string naming an extracted KV field
 //   op          := "=" | "!=" | ">=" | ">" | "<" | "<=" |
 //                  "CONTAINS" | "STARTS_WITH" | "ENDS_WITH" | "MATCHES"
 //   literal     := double-quoted string (backslash escapes: \" \\ \n \r \t;
@@ -20,6 +21,10 @@
 //   - "level" is compared by severity ordinal (DEBUG < INFO < WARN < ERROR);
 //     ordering operators (>=, >, <, <=) only make sense there but are also
 //     accepted for msg/src as lexicographic comparisons.
+//   - "kv(key)" compares against the key=value fields extracted by the KV
+//     extractor (extract.kv = true, see kv_extractor.h) and attached to the
+//     LogRecord. When the record has no such key the comparison is false for
+//     every operator, including "!=" (a missing field matches nothing).
 //   - "=", "!=", CONTAINS, STARTS_WITH, ENDS_WITH are case-insensitive
 //     substring/prefix/suffix/equality tests on msg and src; MATCHES applies
 //     a std::regex (ECMAScript) search against the field value.

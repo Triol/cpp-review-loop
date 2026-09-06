@@ -5,6 +5,8 @@ add_executable(logpipe
   rle.cpp
   config.cpp
   dsl.cpp
+  kv_extractor.cpp
+  prom_stats.cpp
   tailer.cpp
   stdin_reader.cpp
   writer.cpp)

@@ -49,7 +49,7 @@ bool ci_ends_with(const std::string& text, const std::string& suffix) {
 // AST (namespace scope: dsl.h forward-declares dsl::ExprNode)
 // ---------------------------------------------------------------------------
 
-enum class Field { Level, Msg, Src };
+enum class Field { Level, Msg, Src, Kv };
 enum class Op { Eq, Ne, Ge, Gt, Le, Lt, Contains, StartsWith, EndsWith, Matches };
 
 struct ExprNode {
@@ -83,16 +83,27 @@ struct NotNode : ExprNode {
 };
 
 // field op "literal" (or bare boolean for level-less forms; all comparisons
-// here take a quoted string literal per the grammar).
+// here take a quoted string literal per the grammar). `field` selects the
+// record member; Field::Kv instead looks the key up in the record's extracted
+// fields (kv("key") syntax, see dsl.h).
 struct CompareNode : ExprNode {
   Field field = Field::Msg;
+  std::string kv_key;  // only for Field::Kv
   Op op = Op::Eq;
   std::string literal;
   std::shared_ptr<const std::regex> matcher;  // only for Op::Matches
 
   bool eval(const LogRecord& rec) const override {
     if (field == Field::Level) return eval_level(rec);
-    const std::string& value = (field == Field::Msg) ? rec.message : rec.source;
+    if (field == Field::Kv) {
+      const auto it = rec.fields.find(kv_key);
+      if (it == rec.fields.end()) return false;  // missing key: matches nothing
+      return eval_value(it->second);
+    }
+    return eval_value(field == Field::Msg ? rec.message : rec.source);
+  }
+
+  bool eval_value(const std::string& value) const {
     switch (op) {
       case Op::Eq:        return ci_equals(value, literal);
       case Op::Ne:        return !ci_equals(value, literal);
@@ -378,34 +389,63 @@ class Parser {
   }
 
   // comparison := field op string_literal
+  //             | "kv" "(" string_literal ")" op string_literal
   std::unique_ptr<ExprNode> parse_comparison() {
     static const std::map<std::string, Field> kFields = {
         {"level", Field::Level}, {"msg", Field::Msg}, {"src", Field::Src}};
 
+    auto node = std::make_unique<CompareNode>();
+
+    // kv("key") = "value" form: the pseudo-field is the kv( call itself.
+    if (current().kind == TokKind::Ident && ci_equals(current().text, "kv") &&
+        index_ + 1 < tokens_.size() &&
+        tokens_[index_ + 1].kind == TokKind::LParen) {
+      advance();  // kv
+      advance();  // (
+      if (current().kind != TokKind::String) {
+        fail("expected a quoted key inside kv(...)" + describe(current()));
+      }
+      if (current().text.empty()) {
+        fail("the key inside kv(...) must not be empty");
+      }
+      node->field = Field::Kv;
+      node->kv_key = current().text;
+      advance();
+      expect(TokKind::RParen, "')' after the kv key");
+      advance();
+      parse_operator_and_literal(*node);
+      return node;
+    }
+
     if (current().kind != TokKind::Ident || kFields.find(to_lower(current().text)) ==
                                                  kFields.end()) {
-      fail("expected a field name (level, msg or src)" +
+      fail("expected a field name (level, msg, src or kv(...))" +
            (current().kind == TokKind::Ident
                 ? ", got unknown field '" + current().text + "'"
                 : describe(current())));
     }
-    auto node = std::make_unique<CompareNode>();
     node->field = kFields.at(to_lower(current().text));
     advance();
+    parse_operator_and_literal(*node);
+    return node;
+  }
 
+  // Shared tail of a comparison: the operator, the quoted literal and the
+  // compile-time semantic checks (level names, MATCHES regex compilation).
+  void parse_operator_and_literal(CompareNode& node) {
     // Operator: symbols or keyword operators (case-insensitive).
     switch (current().kind) {
-      case TokKind::Eq: node->op = Op::Eq; break;
-      case TokKind::Ne: node->op = Op::Ne; break;
-      case TokKind::Ge: node->op = Op::Ge; break;
-      case TokKind::Gt: node->op = Op::Gt; break;
-      case TokKind::Le: node->op = Op::Le; break;
-      case TokKind::Lt: node->op = Op::Lt; break;
+      case TokKind::Eq: node.op = Op::Eq; break;
+      case TokKind::Ne: node.op = Op::Ne; break;
+      case TokKind::Ge: node.op = Op::Ge; break;
+      case TokKind::Gt: node.op = Op::Gt; break;
+      case TokKind::Le: node.op = Op::Le; break;
+      case TokKind::Lt: node.op = Op::Lt; break;
       case TokKind::Ident:
-        if (is_ident("CONTAINS")) node->op = Op::Contains;
-        else if (is_ident("STARTS_WITH")) node->op = Op::StartsWith;
-        else if (is_ident("ENDS_WITH")) node->op = Op::EndsWith;
-        else if (is_ident("MATCHES")) node->op = Op::Matches;
+        if (is_ident("CONTAINS")) node.op = Op::Contains;
+        else if (is_ident("STARTS_WITH")) node.op = Op::StartsWith;
+        else if (is_ident("ENDS_WITH")) node.op = Op::EndsWith;
+        else if (is_ident("MATCHES")) node.op = Op::Matches;
         else fail("expected a comparison operator after field");
         break;
       default:
@@ -416,30 +456,29 @@ class Parser {
     if (current().kind != TokKind::String) {
       fail("expected a quoted string literal" + describe(current()));
     }
-    node->literal = current().text;
+    node.literal = current().text;
     advance();
 
     // Semantic checks that need the literal (compile-time, with position of
     // the literal approximated by the current position).
-    if (node->field == Field::Level) {
+    if (node.field == Field::Level) {
       Level parsed_level;
-      if (!level_from_string(node->literal, parsed_level) ||
+      if (!level_from_string(node.literal, parsed_level) ||
           parsed_level == Level::Raw) {
-        fail("unknown level name \"" + node->literal +
+        fail("unknown level name \"" + node.literal +
              "\" (expected DEBUG, INFO, WARN or ERROR)");
       }
     }
-    if (node->op == Op::Matches) {
+    if (node.op == Op::Matches) {
       try {
-        node->matcher =
-            std::make_shared<const std::regex>(node->literal,
+        node.matcher =
+            std::make_shared<const std::regex>(node.literal,
                                                std::regex::ECMAScript);
       } catch (const std::regex_error& error) {
-        fail("invalid MATCHES regular expression \"" + node->literal + "\": " +
+        fail("invalid MATCHES regular expression \"" + node.literal + "\": " +
              error.what());
       }
     }
-    return node;
   }
 
   std::vector<Token> tokens_;

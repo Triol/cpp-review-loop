@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <cstdio>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -59,6 +60,20 @@ struct Config {
   // separately in the metrics (0 = unlimited).
   int max_lines_per_sec = 0;
 
+  // extract.kv: run the key=value field extractor (kv_extractor.h) over every
+  // ingested line. Extracted fields attach to the LogRecord (visible to the
+  // DSL kv("key") syntax), feed the Metrics Top-N field-value counters and
+  // drive the extraction-rate diagnostic.
+  bool extract_kv = false;
+
+  // stats.interval_sec: when > 0, the Metrics snapshot is exported in the
+  // Prometheus text format (prom_stats.h) every interval into stats.dir as a
+  // timestamped .prom file; 0 disables the export. stats.keep_files bounds
+  // the retention (oldest exports are pruned after each write).
+  int stats_interval_sec = 0;
+  std::filesystem::path stats_dir{"stats"};
+  int stats_keep_files = 10;
+
   // Tail behaviour and resume state.
   int tail_poll_ms = 500;
   std::filesystem::path offset_file{"logpipe_offsets.txt"};  // empty disables resume
@@ -77,5 +92,11 @@ struct Config {
   // One-line dump for the startup diagnostic message.
   std::string describe() const;
 };
+
+// Writes config.describe() plus a newline to `out` and returns 0. Backs the
+// --dump-config command line switch (main.cpp routes it here so the behaviour
+// is testable without spawning a process); the stdout variant used by the
+// switch simply passes stdout.
+int dump_config(std::FILE* out, const Config& config);
 
 }  // namespace logpipe

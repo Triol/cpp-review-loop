@@ -3,8 +3,11 @@
 add_executable(logpipe_tests
   test_main.cpp
   test_dsl.cpp
+  test_features.cpp
   ../src/config.cpp
   ../src/dsl.cpp
+  ../src/kv_extractor.cpp
+  ../src/prom_stats.cpp
   ../src/tailer.cpp
   ../src/util.cpp
   ../src/rle.cpp

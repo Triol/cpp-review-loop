@@ -4,6 +4,7 @@
 // Every test works on hand-built LogRecord values, so no I/O is involved.
 
 #include <cstdio>
+#include <map>
 #include <stdexcept>
 #include <string>
 
@@ -372,4 +373,85 @@ TEST(dsl_field_independence_and_whitespace) {
   const auto multiline = FilterExpr::compile(
       "level >= \"WARN\"\n  AND\n  src = \"d.log\"");
   CHECK(multiline->passes(r));
+}
+
+// ---------------------------------------------------------------------------
+// kv("key") comparisons: extracted KV fields are addressable from the DSL.
+// A missing key matches nothing (including "!="); the operators behave like
+// the msg/src ones on the extracted value.
+// ---------------------------------------------------------------------------
+namespace {
+
+// rec() with extracted fields attached (mimics the extract.kv pipeline stage).
+LogRecord kv_rec(const std::map<std::string, std::string>& fields) {
+  LogRecord r = rec("app.log", "payload");
+  r.fields = fields;
+  return r;
+}
+
+}  // namespace
+
+TEST(dsl_kv_field_equality_and_missing_key) {
+  const LogRecord r = kv_rec({{"user", "bob"}, {"env", "PROD"}});
+
+  const auto eq = FilterExpr::compile(R"(kv("user") = "bob")");
+  CHECK(eq->passes(r));
+
+  // Case-insensitive value comparison, same as msg/src.
+  const auto env = FilterExpr::compile(R"(kv("env") = "prod")");
+  CHECK(env->passes(r));
+
+  const auto ne = FilterExpr::compile(R"(kv("user") != "alice")");
+  CHECK(ne->passes(r));
+
+  // A missing key matches nothing, including the negated forms.
+  const auto missing = FilterExpr::compile(R"(kv("nope") = "bob")");
+  CHECK(!missing->passes(r));
+  const auto missing_ne = FilterExpr::compile(R"(kv("nope") != "bob")");
+  CHECK(!missing_ne->passes(r));
+  const auto missing_contains = FilterExpr::compile(R"(kv("nope") CONTAINS "o")");
+  CHECK(!missing_contains->passes(r));
+
+  // A record without any extracted fields never matches.
+  CHECK(!eq->passes(rec("app.log", "payload")));
+}
+
+TEST(dsl_kv_field_operators_and_combinators) {
+  const LogRecord r = kv_rec({{"count", "42"}, {"host", "web-01"}});
+
+  const auto contains = FilterExpr::compile(R"(kv("host") CONTAINS "eb-0")");
+  CHECK(contains->passes(r));
+  const auto starts = FilterExpr::compile(R"(kv("host") STARTS_WITH "web")");
+  CHECK(starts->passes(r));
+  const auto ends = FilterExpr::compile(R"(kv("host") ENDS_WITH "01")");
+  CHECK(ends->passes(r));
+  const auto ge = FilterExpr::compile(R"(kv("count") >= "10")");
+  CHECK(ge->passes(r));
+  const auto lt = FilterExpr::compile(R"(kv("count") < "5")");
+  CHECK(lt->passes(r));
+  const auto matches = FilterExpr::compile(R"(kv("host") MATCHES "^web-[0-9]+$")");
+  CHECK(matches->passes(r));
+
+  // Composes with the classic fields through AND / OR / NOT and groups.
+  const auto combo = FilterExpr::compile(
+      R"(level >= "INFO" AND kv("user") = "bob" OR NOT kv("ghost") = "x")");
+  const LogRecord with_user = kv_rec({{"user", "bob"}});
+  CHECK(combo->passes(with_user));
+  const LogRecord without_user = kv_rec({{"other", "x"}});
+  CHECK(combo->passes(without_user));  // the NOT kv("ghost") arm rescues it
+
+  // kv() can be negated directly.
+  const auto negated = FilterExpr::compile(R"(NOT kv("user") = "alice")");
+  CHECK(negated->passes(with_user));
+}
+
+TEST(dsl_kv_syntax_errors_have_positions) {
+  // Missing opening quote for the key.
+  expect_error_at("kv(user) = \"bob\"", 4, "quoted key");
+  // Missing closing parenthesis.
+  expect_error_at("kv(\"user\" = \"bob\"", 11, "')'");
+  // Empty key is rejected at compile time.
+  expect_error_at("kv(\"\") = \"bob\"", 4, "empty");
+  // Unclosed kv call.
+  expect_error_at("kv(\"user\"", 10, "')'");
 }

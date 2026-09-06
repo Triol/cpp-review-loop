@@ -151,6 +151,17 @@ Config Config::load(const std::string& path) {
       }
     } else if (key == "max_lines_per_sec") {
       config.max_lines_per_sec = parse_int(key, value, 0, 100000000);
+    } else if (key == "extract.kv" || key == "extract_kv") {
+      if (!parse_bool(value, config.extract_kv)) {
+        throw std::runtime_error("config: 'extract.kv' expects true or false, got '" +
+                                 value + "'");
+      }
+    } else if (key == "stats.interval_sec") {
+      config.stats_interval_sec = parse_int(key, value, 0, 86400);
+    } else if (key == "stats.dir") {
+      config.stats_dir = value;
+    } else if (key == "stats.keep_files") {
+      config.stats_keep_files = parse_int(key, value, 1, 10000);
     } else if (key == "filter.level") {
       if (!level_from_string(value, config.level_threshold) ||
           config.level_threshold == Level::Raw) {
@@ -219,11 +230,25 @@ std::string Config::describe() const {
       << " keyword=" << (keyword.empty() ? "<none>" : keyword)
       << " filter.expr=" << (filter_expr ? filter_expr->text() : "<off>")
       << " max_lines_per_sec=" << max_lines_per_sec
+      << " extract_kv=" << (extract_kv ? "on" : "off")
+      << " stats=" << (stats_interval_sec > 0
+                           ? (std::to_string(stats_interval_sec) + "s into " +
+                              stats_dir.string() + " keep " +
+                              std::to_string(stats_keep_files))
+                           : std::string("off"))
       << " poll_ms=" << tail_poll_ms << " offsets="
       << (offset_file.empty() ? "<off>" : offset_file.string())
       << " stop_file=" << (stop_file.empty() ? "<off>" : stop_file.string())
       << " duration_sec=" << run_duration_sec;
   return out.str();
+}
+
+int dump_config(std::FILE* out, const Config& config) {
+  if (out == nullptr) return 1;
+  const std::string text = config.describe();
+  std::fwrite(text.data(), 1, text.size(), out);
+  std::fputc('\n', out);
+  return std::fflush(out) == 0 ? 0 : 1;
 }
 
 }  // namespace logpipe

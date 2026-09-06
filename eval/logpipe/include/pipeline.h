@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <condition_variable>
@@ -16,6 +17,8 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "util.h"
 
@@ -84,6 +87,10 @@ struct RawLine {
 };
 
 // A parsed (or deliberately unparsed) record handed to filter and writer.
+// `fields` carries the key/value pairs extracted from the line by the optional
+// KV extractor stage (extract.kv = true, see kv_extractor.h); it stays empty
+// when extraction is disabled or the line has no key=value shape. The DSL can
+// reference these fields with the kv("key") comparison syntax (see dsl.h).
 struct LogRecord {
   std::string source;
   int64_t ingested_ms = 0;
@@ -91,6 +98,7 @@ struct LogRecord {
   Level level = Level::Raw;
   std::string message;         // extracted message, or the whole line for RAW
   bool parsed = false;
+  std::map<std::string, std::string> fields;  // extracted KV fields (may be empty)
 };
 
 // Shared push retry cadence (ms) used by the input sources when the bounded
@@ -277,6 +285,67 @@ class RateLimiter {
 // Thread-safe counters for the end-of-run summary (uptime via util::steady_now_ms).
 class Metrics {
  public:
+  // Immutable point-in-time copy of every counter, consumed by the Prometheus
+  // statistics exporter (prom_stats.h) and by tests. kv_top_values carries the
+  // full per (key, value) counter map unless kv_top_n > 0, in which case at
+  // most kv_top_n values per key are kept (the most frequent ones; ties are
+  // broken by value name for determinism).
+  struct Snapshot {
+    uint64_t ingested = 0;
+    uint64_t filtered = 0;
+    uint64_t written_lines = 0;
+    uint64_t written_bytes = 0;
+    uint64_t rate_dropped = 0;
+    uint64_t compress_raw_bytes = 0;
+    uint64_t compress_packed_bytes = 0;
+    uint64_t rotations_by_size = 0;
+    uint64_t rotations_by_day = 0;
+    uint64_t kv_lines_attempted = 0;
+    uint64_t kv_lines_extracted = 0;
+    uint64_t kv_fields_extracted = 0;
+    uint64_t level_counts[kLevelCount]{};
+    std::map<std::string, uint64_t> source_counts;
+    std::map<std::string, uint64_t> source_written_bytes;
+    std::map<std::string, std::map<std::string, uint64_t>> kv_top_values;
+  };
+
+  // Collects a consistent snapshot; kv_top_n caps the values kept per key
+  // (0 = keep all).
+  Snapshot snapshot(size_t kv_top_n = 0) const {
+    Snapshot snap;
+    snap.ingested = ingested_.load();
+    snap.filtered = filtered_.load();
+    snap.written_lines = written_lines_.load();
+    snap.written_bytes = written_bytes_.load();
+    snap.rate_dropped = rate_dropped_.load();
+    snap.compress_raw_bytes = compress_raw_bytes_.load();
+    snap.compress_packed_bytes = compress_packed_bytes_.load();
+    snap.rotations_by_size = rotations_by_size_.load();
+    snap.rotations_by_day = rotations_by_day_.load();
+    snap.kv_lines_attempted = kv_lines_attempted_.load();
+    snap.kv_lines_extracted = kv_lines_extracted_.load();
+    snap.kv_fields_extracted = kv_fields_extracted_.load();
+    for (int i = 0; i < kLevelCount; ++i) {
+      snap.level_counts[i] = level_counts_[i].load();
+    }
+    {
+      std::lock_guard<std::mutex> lock(source_mutex_);
+      snap.source_counts = source_counts_;
+    }
+    {
+      std::lock_guard<std::mutex> lock(source_bytes_mutex_);
+      snap.source_written_bytes = source_written_bytes_;
+    }
+    {
+      std::lock_guard<std::mutex> lock(kv_mutex_);
+      snap.kv_top_values = kv_value_counts_;
+    }
+    if (kv_top_n > 0) {
+      trim_kv_top_values(snap.kv_top_values, kv_top_n);
+    }
+    return snap;
+  }
+
   void record_input(Level level) {
     level_counts_[static_cast<int>(level)].fetch_add(1, std::memory_order_relaxed);
     ingested_.fetch_add(1, std::memory_order_relaxed);
@@ -312,6 +381,37 @@ class Metrics {
   }
   // Lines dropped because the configured rate limit was exceeded.
   void record_rate_dropped() { rate_dropped_.fetch_add(1, std::memory_order_relaxed); }
+
+  // KV extraction accounting (extract.kv = true): one record_kv_line call per
+  // ingested line offered to the extractor, with `extracted` telling whether
+  // the line had the key=value shape. Each extracted pair is counted once more
+  // through record_kv_value, which also maintains the per (key, value) counter
+  // map used for the Top-N field-value statistics.
+  void record_kv_line(bool extracted) {
+    kv_lines_attempted_.fetch_add(1, std::memory_order_relaxed);
+    if (extracted) {
+      kv_lines_extracted_.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+  void record_kv_value(const std::string& key, const std::string& value) {
+    kv_fields_extracted_.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(kv_mutex_);
+    ++kv_value_counts_[key][value];
+  }
+
+  // Read-only accessors for the KV counters (used by tests and the summary).
+  uint64_t kv_lines_attempted() const { return kv_lines_attempted_.load(); }
+  uint64_t kv_lines_extracted() const { return kv_lines_extracted_.load(); }
+  uint64_t kv_fields_extracted() const { return kv_fields_extracted_.load(); }
+
+  // KV extraction rate in percent (0-100); 100 when nothing was offered yet
+  // (the rate is only meaningful once lines were attempted).
+  int kv_extraction_rate_percent() const {
+    const uint64_t attempted = kv_lines_attempted_.load();
+    if (attempted == 0) return 100;
+    const uint64_t extracted = kv_lines_extracted_.load();
+    return static_cast<int>((extracted * 100 + attempted / 2) / attempted);
+  }
 
   // Read-only accessors for the new counters (used by tests and the writer).
   uint64_t compressed_raw_bytes() const { return compress_raw_bytes_.load(); }
@@ -354,10 +454,43 @@ class Metrics {
         }
       }
     }
+    if (kv_lines_attempted_.load() > 0) {
+      out << "kv lines attempted : " << kv_lines_attempted_.load() << "\n"
+          << "kv lines extracted : " << kv_lines_extracted_.load() << "\n"
+          << "kv fields extracted: " << kv_fields_extracted_.load() << "\n"
+          << "kv extraction rate : " << kv_extraction_rate_percent() << "%\n";
+    }
     return out.str();
   }
 
  private:
+  // Keeps at most top_n most-frequent values per key (ties broken by value
+  // name, ascending) so the exported statistics stay bounded.
+  static void trim_kv_top_values(
+      std::map<std::string, std::map<std::string, uint64_t>>& values,
+      size_t top_n) {
+    for (auto& entry : values) {
+      std::map<std::string, uint64_t>& per_key = entry.second;
+      if (per_key.size() <= top_n) continue;
+      // Move into a vector, sort by count desc then value asc, keep top_n.
+      std::vector<std::pair<const std::string*, uint64_t>> ranked;
+      ranked.reserve(per_key.size());
+      for (const auto& item : per_key) {
+        ranked.emplace_back(&item.first, item.second);
+      }
+      std::sort(ranked.begin(), ranked.end(),
+                [](const auto& a, const auto& b) {
+                  if (a.second != b.second) return a.second > b.second;
+                  return *a.first < *b.first;
+                });
+      std::map<std::string, uint64_t> kept;
+      for (size_t i = 0; i < top_n && i < ranked.size(); ++i) {
+        kept[*ranked[i].first] = ranked[i].second;
+      }
+      per_key = std::move(kept);
+    }
+  }
+
   std::atomic<uint64_t> level_counts_[kLevelCount]{};
   std::atomic<uint64_t> ingested_{0};
   std::atomic<uint64_t> filtered_{0};
@@ -372,6 +505,13 @@ class Metrics {
   std::map<std::string, uint64_t> source_counts_;
   mutable std::mutex source_bytes_mutex_;  // guards source_written_bytes_
   std::map<std::string, uint64_t> source_written_bytes_;
+  // KV extraction accounting; the (key, value) counter map feeds the Top-N
+  // field-value statistics exported through the Prometheus writer.
+  std::atomic<uint64_t> kv_lines_attempted_{0};
+  std::atomic<uint64_t> kv_lines_extracted_{0};
+  std::atomic<uint64_t> kv_fields_extracted_{0};
+  mutable std::mutex kv_mutex_;  // guards kv_value_counts_
+  std::map<std::string, std::map<std::string, uint64_t>> kv_value_counts_;
 };
 
 }  // namespace logpipe

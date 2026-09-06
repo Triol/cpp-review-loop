@@ -2,7 +2,9 @@
 # config, rle, writer) are compiled straight into the test binary.
 add_executable(logpipe_tests
   test_main.cpp
+  test_dsl.cpp
   ../src/config.cpp
+  ../src/dsl.cpp
   ../src/tailer.cpp
   ../src/util.cpp
   ../src/rle.cpp

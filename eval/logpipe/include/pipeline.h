@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <iomanip>
 #include <map>
 #include <mutex>
@@ -197,20 +198,34 @@ class LogParser {
 
 // Drops records below the level threshold or missing the optional keyword
 // (case-insensitive substring). RAW always passes the threshold (see Level).
+// An optional pre-filter predicate (the compiled filter.expr DSL, see dsl.h)
+// runs FIRST when installed: only records it accepts reach the threshold and
+// keyword stages, so DSL + threshold/keyword compose in that order.
 class LogFilter {
  public:
+  // Predicate evaluated before threshold/keyword; may be empty (no DSL).
+  using PreFilter = std::function<bool(const LogRecord&)>;
+
   LogFilter() = default;
   LogFilter(Level threshold, std::string keyword)
       : threshold_(threshold), keyword_on_(!keyword.empty()) {
     keyword_lower_.reserve(keyword.size());
     for (char c : keyword) keyword_lower_.push_back(to_lower(c));
   }
+  LogFilter(Level threshold, std::string keyword, PreFilter pre_filter)
+      : LogFilter(threshold, std::move(keyword)) {
+    pre_filter_ = std::move(pre_filter);
+  }
 
   bool passes(const LogRecord& rec) const {
+    if (pre_filter_ && !pre_filter_(rec)) return false;  // DSL: first stage
     if (static_cast<int>(rec.level) < static_cast<int>(threshold_)) return false;
     if (keyword_on_ && !contains_keyword(rec.message)) return false;
     return true;
   }
+
+  // True when a DSL pre-filter is installed (for startup diagnostics).
+  bool dsl_active() const { return static_cast<bool>(pre_filter_); }
 
  private:
   static char to_lower(char c) {
@@ -226,6 +241,7 @@ class LogFilter {
   Level threshold_ = Level::Debug;
   std::string keyword_lower_;
   bool keyword_on_ = false;
+  PreFilter pre_filter_;  // optional DSL stage (empty = not configured)
 };
 
 // Fixed-window rate limiter shared by all input sources: admits at most

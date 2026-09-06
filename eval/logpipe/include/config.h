@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "dsl.h"       // FilterExpr (compiled filter.expr)
 #include "pipeline.h"  // Level, OutputFormat, CompressMode
 #include "util.h"      // DiagLevel
 #include "writer.h"    // CompressMode
@@ -45,6 +46,14 @@ struct Config {
   // case-insensitive keyword (empty disables it).
   Level level_threshold = Level::Info;
   std::string keyword;
+
+  // filter.expr: an optional DSL expression (see dsl.h) applied as the FIRST
+  // filter stage, ahead of threshold/keyword. filter_expr_text keeps the raw
+  // text for diagnostics; filter_expr is the compiled form (null when the key
+  // is absent or empty). Compilation happens in Config::load, so a malformed
+  // expression aborts startup with a positioned dsl::Error.
+  std::string filter_expr_text;
+  std::shared_ptr<const dsl::FilterExpr> filter_expr;
 
   // Rate limit: lines beyond max_lines_per_sec are dropped and counted
   // separately in the metrics (0 = unlimited).

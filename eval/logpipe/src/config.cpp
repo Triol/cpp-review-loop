@@ -159,6 +159,10 @@ Config Config::load(const std::string& path) {
       }
     } else if (key == "filter.keyword") {
       config.keyword = value;
+    } else if (key == "filter.expr") {
+      // Keep the raw text; the compiled form is built once after the whole
+      // file is consumed so dsl errors surface before anything else runs.
+      config.filter_expr_text = value;
     } else if (key == "tail.poll_ms") {
       config.tail_poll_ms = parse_int(key, value, 20, 60000);
     } else if (key == "state.offset_file") {
@@ -187,6 +191,12 @@ Config Config::load(const std::string& path) {
   if (config.output_base.empty()) {
     throw std::runtime_error("config: 'output.file' must not be empty");
   }
+  // Compile filter.expr now: dsl::Error carries the position in the
+  // expression and derives from runtime_error, so it propagates verbatim and
+  // a bad expression aborts the run before any thread starts.
+  if (!config.filter_expr_text.empty()) {
+    config.filter_expr = dsl::FilterExpr::compile(config.filter_expr_text);
+  }
   return config;
 }
 
@@ -207,6 +217,7 @@ std::string Config::describe() const {
       << " rotate=" << rotate_size_bytes << "B x" << rotate_backups
       << " level>=" << level_name(level_threshold)
       << " keyword=" << (keyword.empty() ? "<none>" : keyword)
+      << " filter.expr=" << (filter_expr ? filter_expr->text() : "<off>")
       << " max_lines_per_sec=" << max_lines_per_sec
       << " poll_ms=" << tail_poll_ms << " offsets="
       << (offset_file.empty() ? "<off>" : offset_file.string())

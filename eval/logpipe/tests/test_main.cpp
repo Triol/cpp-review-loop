@@ -1,7 +1,8 @@
-// test_main.cpp - minimal zero-dependency assertion runner for logpipe.
+// test_main.cpp - assertion tests for the logpipe pipeline (tailer, config,
+// parser, rle, writer, DSL integration) plus the test runner main().
 //
-// No third-party framework: tests register themselves via the TEST macro,
-// main() runs them in order and exits non-zero when any CHECK failed.
+// The framework lives in test_framework.h; DSL unit tests live in
+// test_dsl.cpp and register into the same registry.
 
 #include <atomic>
 #include <chrono>
@@ -15,62 +16,14 @@
 #include <vector>
 
 #include "config.h"
+#include "dsl.h"
 #include "pipeline.h"
 #include "rle.h"
 #include "tailer.h"
+#include "test_framework.h"
 #include "writer.h"
 
 namespace fs = std::filesystem;
-
-namespace testfw {
-
-struct TestCase {
-  const char* name;
-  void (*fn)();
-};
-
-inline std::vector<TestCase>& registry() {
-  static std::vector<TestCase> registry;
-  return registry;
-}
-
-struct Registrar {
-  Registrar(const char* name, void (*fn)()) { registry().push_back({name, fn}); }
-};
-
-inline int& failures() {
-  static int count = 0;
-  return count;
-}
-
-}  // namespace testfw
-
-#define CHECK(cond)                                                              \
-  do {                                                                           \
-    if (!(cond)) {                                                               \
-      ++testfw::failures();                                                      \
-      std::fprintf(stderr, "  CHECK failed at %s:%d: %s\n", __FILE__, __LINE__,  \
-                   #cond);                                                       \
-    }                                                                            \
-  } while (0)
-
-// Equality check for values printable with c_str() (std::string and const char*).
-#define CHECK_STR_EQ(actual, expected)                                           \
-  do {                                                                           \
-    const std::string& a_ = (actual);                                            \
-    const std::string& e_ = (expected);                                          \
-    if (a_ != e_) {                                                              \
-      ++testfw::failures();                                                      \
-      std::fprintf(stderr, "  CHECK_STR_EQ failed at %s:%d\n    actual  : \"%s\"\n" \
-                           "    expected: \"%s\"\n",                             \
-                   __FILE__, __LINE__, a_.c_str(), e_.c_str());                  \
-    }                                                                            \
-  } while (0)
-
-#define TEST(name)                                                     \
-  static void name();                                                  \
-  static const testfw::Registrar registrar_##name(#name, &name);       \
-  static void name()
 
 // ---------------------------------------------------------------------------
 // F1 regression: after a short read hits EOF, istream sets eofbit|failbit and
@@ -496,6 +449,270 @@ TEST(metrics_summary_reports_new_fields) {
   CHECK(summary.find("rotations by day  : 1") != std::string::npos);
   CHECK(summary.find("output bytes per source:") != std::string::npos);
   CHECK(summary.find("only_source") != std::string::npos);
+
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// ---------------------------------------------------------------------------
+// filter.expr config integration: Config::load compiles the expression, the
+// raw text shows up in describe(), and the compiled form drives the filter.
+// ---------------------------------------------------------------------------
+TEST(config_loads_filter_expr_and_drives_filter) {
+  const fs::path dir = make_temp_dir("logpipe_fexpr_");
+  const fs::path cfg = dir / "expr.conf";
+  {
+    std::ofstream out(cfg, std::ios::binary | std::ios::trunc);
+    out << "input.files = dummy.log\n"
+        << "output.file = out.log\n"
+        << "filter.level = INFO\n"
+        << "filter.expr = level >= \"WARN\" AND (msg CONTAINS \"timeout\" OR src ENDS_WITH \".log\")\n";
+  }
+
+  logpipe::Config config;
+  try {
+    config = logpipe::Config::load(cfg.string());
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "  Config::load threw: %s\n", e.what());
+    ++testfw::failures();
+    return;
+  }
+  CHECK(config.filter_expr != nullptr);
+  CHECK(config.filter_expr_text.find("WARN") != std::string::npos);
+  CHECK(config.describe().find("filter.expr=") != std::string::npos);
+  CHECK(config.describe().find("timeout") != std::string::npos);
+
+  // Same wiring main() uses: DSL first, then threshold/keyword.
+  const std::shared_ptr<const logpipe::dsl::FilterExpr> expr = config.filter_expr;
+  logpipe::LogFilter filter(config.level_threshold, config.keyword,
+                            [expr](const logpipe::LogRecord& r) { return expr->passes(r); });
+  CHECK(filter.dsl_active());
+
+  const auto mk = [&](const char* src, const std::string& msg, logpipe::Level level) {
+    logpipe::LogRecord r = make_record(src, msg);
+    r.level = level;
+    return r;
+  };
+  // DSL passes, threshold passes.
+  CHECK(filter.passes(mk("a.log", "connect timeout", logpipe::Level::Warn)));
+  // DSL passes via src, but the INFO threshold drops it: DSL first, threshold second.
+  CHECK(!filter.passes(mk("b.LOG", "all good", logpipe::Level::Info)));
+  // DSL rejects (level gate ok but neither msg nor src arm matches).
+  CHECK(!filter.passes(mk("c.txt", "all good", logpipe::Level::Error)));
+  // DSL and threshold both reject.
+  CHECK(!filter.passes(mk("c.txt", "all good", logpipe::Level::Debug)));
+
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// ---------------------------------------------------------------------------
+// filter.expr without threshold/keyword interplay: when the key is absent the
+// filter must keep the plain threshold/keyword behaviour (no DSL stage).
+// ---------------------------------------------------------------------------
+TEST(config_without_filter_expr_keeps_plain_filter) {
+  const fs::path dir = make_temp_dir("logpipe_noexpr_");
+  const fs::path cfg = dir / "plain.conf";
+  {
+    std::ofstream out(cfg, std::ios::binary | std::ios::trunc);
+    out << "input.files = dummy.log\n"
+        << "output.file = out.log\n"
+        << "filter.level = WARN\n"
+        << "filter.keyword = disk\n";
+  }
+
+  const logpipe::Config config = logpipe::Config::load(cfg.string());
+  CHECK(config.filter_expr == nullptr);
+  CHECK(config.filter_expr_text.empty());
+  CHECK(config.describe().find("filter.expr=<off>") != std::string::npos);
+
+  logpipe::LogFilter filter(config.level_threshold, config.keyword);
+  CHECK(!filter.dsl_active());
+
+  logpipe::LogRecord pass = make_record("a.log", "hard DISK full");
+  pass.level = logpipe::Level::Warn;
+  CHECK(filter.passes(pass));
+
+  logpipe::LogRecord low = make_record("a.log", "disk full");
+  low.level = logpipe::Level::Info;
+  CHECK(!filter.passes(low));  // threshold still applies
+
+  logpipe::LogRecord no_keyword = make_record("a.log", "unrelated");
+  no_keyword.level = logpipe::Level::Error;
+  CHECK(!filter.passes(no_keyword));  // keyword still applies
+
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// ---------------------------------------------------------------------------
+// A malformed filter.expr must abort Config::load with a dsl::Error that
+// carries the position in the expression text.
+// ---------------------------------------------------------------------------
+TEST(config_rejects_malformed_filter_expr_with_position) {
+  struct Case {
+    const char* expr;
+    int position;
+  };
+  const Case cases[] = {
+      {"level >= ", 9},               // missing literal (End token position)
+      {"msg CONTAINS \"oops", 19},    // unterminated string
+      {R"(host = "h")", 1},            // unknown field
+      {R"(level = "WARN" extra)", 16}, // trailing garbage
+  };
+  for (const Case& c : cases) {
+    const fs::path dir = make_temp_dir("logpipe_badexpr_");
+    const fs::path cfg = dir / "bad.conf";
+    {
+      std::ofstream out(cfg, std::ios::binary | std::ios::trunc);
+      out << "input.files = dummy.log\n"
+          << "filter.expr = " << c.expr << "\n";
+    }
+    bool threw = false;
+    try {
+      logpipe::Config::load(cfg.string());
+    } catch (const logpipe::dsl::Error& e) {
+      threw = true;
+      CHECK_EQ_INT(e.pos, c.position);
+      CHECK(std::string(e.what()).find("filter.expr") != std::string::npos);
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "  wrong exception for '%s': %s\n", c.expr, e.what());
+      ++testfw::failures();
+    }
+    CHECK(threw);
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// End to end: file tailer -> queue -> parser -> DSL-first filter -> rolling
+// writer. Only records surviving the DSL expression may reach the output.
+// ---------------------------------------------------------------------------
+TEST(pipeline_end_to_end_dsl_first_filter) {
+  const fs::path dir = make_temp_dir("logpipe_e2e_");
+  const fs::path input = dir / "app.log";
+  {
+    std::ofstream out(input, std::ios::binary | std::ios::trunc);
+    out << "2026-09-06 12:00:00 [WARN] connect timeout to db\n"
+        << "2026-09-06 12:00:01 [INFO] routine heartbeat ok\n"
+        << "2026-09-06 12:00:02 [ERROR] disk failure imminent\n"
+        << "plain unparsed noise line\n";
+  }
+
+  const std::string expr_text = R"(level >= "WARN")";
+  const auto expr = logpipe::dsl::FilterExpr::compile(expr_text);
+
+  logpipe::BlockingQueue<logpipe::RawLine> queue(64);
+  logpipe::TailOptions topts;
+  topts.poll_ms = 10;  // offset_file stays empty (no persistence)
+  logpipe::Tailer tailer({input}, queue, topts);
+  std::thread tailer_thread([&tailer] { tailer.run(); });
+
+  logpipe::LogParser parser;
+  logpipe::LogFilter filter(logpipe::Level::Debug, "",
+                            [expr](const logpipe::LogRecord& r) { return expr->passes(r); });
+  CHECK(filter.dsl_active());
+
+  logpipe::Metrics metrics;
+  logpipe::WriterOptions wopts;
+  wopts.output_dir = dir;
+  wopts.base_name = "e2e_out.log";
+  wopts.daily_rotation = true;
+  int64_t fake_now = 1788696000000;
+  wopts.clock = [&fake_now] { return fake_now; };
+  logpipe::RollingWriter writer(wopts, &metrics);
+  CHECK(writer.open());
+
+  int written = 0, filtered = 0;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (written + filtered < 4 && std::chrono::steady_clock::now() < deadline) {
+    logpipe::RawLine raw;
+    if (queue.pop_for(raw, 50) != logpipe::BlockingQueue<logpipe::RawLine>::PopResult::Got) {
+      continue;
+    }
+    const logpipe::LogRecord record = parser.parse(raw.source, raw.ingested_ms, raw.text);
+    metrics.record_input(record.level);
+    if (filter.passes(record)) {
+      uint64_t bytes = 0;
+      CHECK(writer.write(record, bytes));
+      ++written;
+    } else {
+      ++filtered;
+    }
+  }
+
+  tailer.request_stop();
+  tailer_thread.join();
+  writer.close();
+  CHECK(!writer.failed());
+
+  // WARN timeout, ERROR disk and the RAW noise (Raw ranks above every gate)
+  // pass; the INFO heartbeat is dropped by the DSL even though a plain
+  // DEBUG threshold would have kept it.
+  CHECK_EQ_INT(written, 3);
+  CHECK_EQ_INT(filtered, 1);
+
+  const std::string day =
+      logpipe::util::timestamp_compact(fake_now).substr(0, 8);
+  const std::string out = read_text_file(dir / ("e2e_out_" + day + ".log"));
+  CHECK(out.find("connect timeout to db") != std::string::npos);
+  CHECK(out.find("disk failure imminent") != std::string::npos);
+  CHECK(out.find("plain unparsed noise line") != std::string::npos);
+  CHECK(out.find("routine heartbeat ok") == std::string::npos);
+
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// ---------------------------------------------------------------------------
+// End to end with a config file only (no hand-compiled expression): the same
+// pipeline wiring but DSL text comes from filter.expr in the config, and the
+// threshold/keyword stage composes after the DSL.
+// ---------------------------------------------------------------------------
+TEST(pipeline_end_to_end_config_expr_with_keyword_stage) {
+  const fs::path dir = make_temp_dir("logpipe_e2ecfg_");
+  const fs::path cfg = dir / "e2e.conf";
+  {
+    std::ofstream out(cfg, std::ios::binary | std::ios::trunc);
+    out << "input.files = " << (dir / "in.log").string() << "\n"
+        << "filter.level = INFO\n"
+        << "filter.keyword = disk\n"
+        << "filter.expr = msg CONTAINS \"disk\"\n";
+  }
+  const fs::path input = dir / "in.log";
+  {
+    std::ofstream out(input, std::ios::binary | std::ios::trunc);
+    out << "2026-09-06 12:00:00 [ERROR] disk full\n"        // DSL ok, INFO ok, keyword ok
+        << "2026-09-06 12:00:01 [WARN] memory pressure\n"   // DSL drops (no "disk")
+        << "2026-09-06 12:00:02 [INFO] disk usage 42%\n"    // DSL ok, threshold ok, keyword ok
+        << "2026-09-06 12:00:03 [DEBUG] disk spinup\n";     // DSL ok, threshold drops
+  }
+
+  const logpipe::Config config = logpipe::Config::load(cfg.string());
+  CHECK(config.filter_expr != nullptr);
+
+  const std::shared_ptr<const logpipe::dsl::FilterExpr> expr = config.filter_expr;
+  logpipe::LogFilter filter(config.level_threshold, config.keyword,
+                            [expr](const logpipe::LogRecord& r) { return expr->passes(r); });
+
+  logpipe::LogParser parser;
+  std::vector<std::string> kept;
+  {
+    std::ifstream in(input, std::ios::binary);
+    std::string line;
+    int64_t ms = 1757160000000;
+    while (std::getline(in, line)) {
+      const logpipe::LogRecord record = parser.parse("in.log", ms, line);
+      ms += 1000;
+      if (filter.passes(record)) kept.push_back(record.message);
+    }
+  }
+
+  CHECK_EQ_INT(kept.size(), 2);
+  CHECK(kept[0].find("disk full") != std::string::npos);
+  CHECK(kept[1].find("disk usage 42%") != std::string::npos);
 
   std::error_code ec;
   fs::remove_all(dir, ec);

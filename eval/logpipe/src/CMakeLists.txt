@@ -4,6 +4,7 @@ add_executable(logpipe
   util.cpp
   rle.cpp
   config.cpp
+  dsl.cpp
   tailer.cpp
   stdin_reader.cpp
   writer.cpp)

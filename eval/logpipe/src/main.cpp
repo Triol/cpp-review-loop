@@ -12,6 +12,7 @@
 #include <thread>
 
 #include "config.h"
+#include "dsl.h"
 #include "pipeline.h"
 #include "stdin_reader.h"
 #include "tailer.h"
@@ -57,6 +58,13 @@ int main(int argc, char** argv) {
   util::init_diag(config.diag_level, config.diag_file);  // apply configured sink/verbosity
   util::log_info("logpipe: starting (config: " + config_path + ")");
   util::log_debug("logpipe: config: " + config.describe());
+  // Report the DSL filter state explicitly: it is the first filter stage and
+  // changes which lines survive (demo output mirrors this in the summary log).
+  if (config.filter_expr) {
+    util::log_info("logpipe: filter DSL enabled: " + config.filter_expr->text());
+  } else {
+    util::log_info("logpipe: filter DSL disabled (threshold/keyword only)");
+  }
 
   const int64_t start_ms = util::steady_now_ms();  // elapsed-time measurement (monotonic)
   const int64_t duration_limit_ms = static_cast<int64_t>(config.run_duration_sec) * 1000;
@@ -64,7 +72,14 @@ int main(int argc, char** argv) {
   // Wire the pipeline: reader threads -> queue -> main thread (this one).
   BlockingQueue<RawLine> queue(1024);
   LogParser parser;
-  LogFilter filter(config.level_threshold, config.keyword);
+  // The compiled filter.expr (if any) is wired in as the first filter stage;
+  // threshold and keyword keep their existing behaviour after it.
+  LogFilter::PreFilter dsl_stage;
+  if (config.filter_expr) {
+    const std::shared_ptr<const dsl::FilterExpr> expr = config.filter_expr;
+    dsl_stage = [expr](const LogRecord& rec) { return expr->passes(rec); };
+  }
+  LogFilter filter(config.level_threshold, config.keyword, std::move(dsl_stage));
   RateLimiter limiter(config.max_lines_per_sec);
   Metrics metrics;
   WriterOptions writer_options;
@@ -184,6 +199,9 @@ int main(int argc, char** argv) {
 
   // Diagnostics go through the util module; this summary is the program's
   // primary report and therefore goes to stdout.
-  std::cout << metrics.summary(start_ms) << std::flush;
+  std::cout << metrics.summary(start_ms);
+  std::cout << "filter DSL      : "
+            << (filter.dsl_active() ? "enabled" : "disabled") << "\n"
+            << std::flush;
   return write_failures > 0 ? 4 : 0;
 }

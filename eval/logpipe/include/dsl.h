@@ -9,6 +9,7 @@
 //   unary       := "NOT" unary | primary
 //   primary     := "(" expr ")" | comparison
 //   comparison  := field op literal | "kv" "(" key ")" op literal
+//                  | "field" "(" key ")" op literal
 //   field       := "level" | "msg" | "src"
 //   key         := double-quoted string naming an extracted KV field
 //   op          := "=" | "!=" | ">=" | ">" | "<" | "<=" |
@@ -23,8 +24,10 @@
 //     accepted for msg/src as lexicographic comparisons.
 //   - "kv(key)" compares against the key=value fields extracted by the KV
 //     extractor (extract.kv = true, see kv_extractor.h) and attached to the
-//     LogRecord. When the record has no such key the comparison is false for
-//     every operator, including "!=" (a missing field matches nothing).
+//     LogRecord. "field(key)" reads the same map and exists for the injected
+//     source tags (source.<n>.tags); both forms are interchangeable. When the
+//     record has no such key the comparison is false for every operator,
+//     including "!=" (a missing field matches nothing).
 //   - "=", "!=", CONTAINS, STARTS_WITH, ENDS_WITH are case-insensitive
 //     substring/prefix/suffix/equality tests on msg and src; MATCHES applies
 //     a std::regex (ECMAScript) search against the field value.

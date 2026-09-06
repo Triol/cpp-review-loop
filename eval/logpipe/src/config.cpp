@@ -158,7 +158,7 @@ const std::vector<std::string>& known_keys() {
       "state.offset_file",  "run.duration_sec",   "stop_file",
       "diag.level",         "diag.file",          "active_profile",
       "write.buffer_lines", "write.buffer_bytes", "encrypt.password",
-      "read.chunk_bytes",   "queue.capacity",
+      "read.chunk_bytes",   "queue.capacity",     "glob.exclude",
   };
   return keys;
 }
@@ -371,24 +371,72 @@ void apply_entry(Config& config, const RawEntry& entry, bool& inputs_reset) {
     if (from_override && !inputs_reset) {
       config.input_files.clear();
       config.input_stdin = false;
+      config.glob_sources.clear();
+      config.input_entry_specs.clear();
       inputs_reset = true;
     }
     for (const auto& item : split_list(value)) {
-      // "stdin:" selects standard input as an extra source; anything else
-      // is treated as a file path.
+      // "stdin:" selects standard input as an extra source; "glob:<pattern>"
+      // declares a pattern-discovery directory source; anything else is
+      // treated as a plain file path. Every entry gets a 1-based declaration
+      // index so its source.<n>.tags can be attached later.
       if (to_lower(item) == "stdin:") {
         config.input_stdin = true;
+        config.input_entry_specs.push_back("stdin");
+      } else if (item.rfind("glob:", 0) == 0 && item.size() > 5) {
+        GlobSourceConfig glob;
+        glob.pattern = item.substr(5);
+        config.glob_sources.push_back(glob);
+        config.input_entry_specs.push_back(item);
       } else {
         config.input_files.emplace_back(item);
+        config.input_entry_specs.push_back("file:" + item);
       }
     }
     std::string shown;
-    for (size_t i = 0; i < config.input_files.size(); ++i) {
-      shown += (i != 0 ? ", " : "") + config.input_files[i].string();
+    for (const std::string& spec : config.input_entry_specs) {
+      shown += (shown.empty() ? "" : ", ") +
+               (spec == "stdin" ? std::string("stdin:") : spec);
     }
-    if (config.input_stdin) shown += (shown.empty() ? "" : ", ") + std::string("stdin:");
     record(shown);
     return;
+  }
+  if (key == "glob.exclude") {
+    // Append (repeated keys accumulate); a profile/env override appends too,
+    // mirroring how list-valued knobs behave elsewhere.
+    for (const std::string& pattern : split_list(value)) {
+      config.glob_exclude.push_back(pattern);
+    }
+    std::string shown;
+    for (const std::string& pattern : config.glob_exclude) {
+      shown += (shown.empty() ? "" : ", ") + pattern;
+    }
+    record(shown);
+    return;
+  }
+  // source.<N>.tags: source-level metadata for the N-th input entry
+  // (1-based, in input.files declaration order). Only the "tags" attribute
+  // exists today; anything else falls through to the unknown-key warning.
+  if (key.rfind("source.", 0) == 0) {
+    const std::string rest = key.substr(7);
+    const auto dot = rest.find('.');
+    if (dot != std::string::npos && is_number(rest.substr(0, dot)) &&
+        rest.substr(dot + 1) == "tags") {
+      const int index = parse_int("source.<N> index", rest.substr(0, dot), 1, 9999);
+      // Comma-separated k=v pairs; a bare word becomes <word>="true".
+      SourceTags tags;
+      for (const std::string& item : split_list(value)) {
+        const auto eq = item.find('=');
+        if (eq != std::string::npos) {
+          tags[item.substr(0, eq)] = item.substr(eq + 1);
+        } else if (!item.empty()) {
+          tags[item] = "true";
+        }
+      }
+      config.source_tags[index] = tags;
+      record(value);
+      return;
+    }
   }
   if (key == "output.dir") {
     config.output_dir = value;
@@ -525,6 +573,14 @@ std::string effective_value_of(const Config& config, const std::string& key) {
   if (key == "state.offset_file") {
     return config.offset_file.empty() ? "<off>" : config.offset_file.string();
   }
+  if (key == "glob.exclude") {
+    if (config.glob_exclude.empty()) return "<none>";
+    std::string shown;
+    for (const std::string& pattern : config.glob_exclude) {
+      shown += (shown.empty() ? "" : ", ") + pattern;
+    }
+    return shown;
+  }
   if (key == "run.duration_sec") return std::to_string(config.run_duration_sec);
   if (key == "stop_file") return config.stop_file.empty() ? "<off>" : config.stop_file.string();
   if (key == "diag.level") return diag_level_name(config.diag_level);
@@ -616,6 +672,7 @@ Config Config::load(const std::string& path, const LoadOptions& options) {
       for (const std::string& attr : fanout_attrs()) {
         consider("output." + std::to_string(n) + "." + attr);
       }
+      consider("source." + std::to_string(n) + ".tags");
     }
   }
   for (const RawEntry& entry : env_entries) {
@@ -682,7 +739,31 @@ Config Config::load(const std::string& path, const LoadOptions& options) {
   }
 
   // ---- validation and finalization ------------------------------------------
-  if (config.input_files.empty() && !config.input_stdin) {
+  // Resolve the source tags onto the input entries: source.<n>.tags was
+  // parsed independently of input.files, so the attachment happens once both
+  // sides are known (order of the two keys in the file does not matter).
+  {
+    size_t next_glob = 0;  // the i-th "glob:" spec created the i-th glob slot
+    for (size_t i = 0; i < config.input_entry_specs.size(); ++i) {
+      const int index = static_cast<int>(i) + 1;
+      const auto tags_it = config.source_tags.find(index);
+      SourceTags tags;
+      if (tags_it != config.source_tags.end()) tags = tags_it->second;
+      const std::string& spec = config.input_entry_specs[i];
+      if (spec == "stdin") {
+        config.stdin_tags = tags;
+      } else if (spec.rfind("glob:", 0) == 0) {
+        if (next_glob < config.glob_sources.size()) {
+          config.glob_sources[next_glob].tags = tags;
+          ++next_glob;
+        }
+      } else if (spec.rfind("file:", 0) == 0) {
+        const std::filesystem::path path(spec.substr(5));
+        config.file_tags[normalize_file_key(path)] = tags;
+      }
+    }
+  }
+  if (config.input_files.empty() && !config.input_stdin && config.glob_sources.empty()) {
     throw std::runtime_error("config: no input sources given (set 'input.files = a.log, b.log'"
                              " or add 'stdin:' to input.files)");
   }
@@ -754,7 +835,11 @@ std::string Config::describe() const {
     out << (i != 0 ? ", " : "") << input_files[i].string();
   }
   if (input_stdin) {
-    out << (input_files.empty() ? "" : ", ") << "<stdin>";
+    out << (input_files.empty() && glob_sources.empty() ? "" : ", ") << "<stdin>";
+  }
+  for (size_t g = 0; g < glob_sources.size(); ++g) {
+    out << (input_files.empty() && !input_stdin && g == 0 ? "" : ", ")
+        << "glob:" << glob_sources[g].pattern;
   }
   out << "] output_dir=" << output_dir.string() << " output_file=" << output_base
       << " format=" << output_format_name(output_format)
@@ -865,6 +950,13 @@ int check_config_report(std::FILE* out, const std::string& path, const Config& c
   // Custom level registrations appear at the end of the report.
   for (const auto& item : config.effective) {
     if (item.first.rfind("level.register.", 0) == 0) {
+      row(item.first, item.second.value);
+    }
+  }
+  // Per-source tag assignments too (index-keyed, so not in known_keys()).
+  for (const auto& item : config.effective) {
+    if (item.first.rfind("source.", 0) == 0 &&
+        item.first.find(".tags") != std::string::npos) {
       row(item.first, item.second.value);
     }
   }

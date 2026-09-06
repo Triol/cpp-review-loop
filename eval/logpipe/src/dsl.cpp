@@ -390,28 +390,37 @@ class Parser {
 
   // comparison := field op string_literal
   //             | "kv" "(" string_literal ")" op string_literal
+  //             | "field" "(" string_literal ")" op string_literal
   std::unique_ptr<ExprNode> parse_comparison() {
     static const std::map<std::string, Field> kFields = {
         {"level", Field::Level}, {"msg", Field::Msg}, {"src", Field::Src}};
 
     auto node = std::make_unique<CompareNode>();
 
-    // kv("key") = "value" form: the pseudo-field is the kv( call itself.
-    if (current().kind == TokKind::Ident && ci_equals(current().text, "kv") &&
+    // kv("key") / field("key") = "value" form: the pseudo-field is the call
+    // itself. Both read the record's field map (extracted KV pairs and the
+    // injected source tags share it); field(...) exists so source-level
+    // metadata reads naturally (field("tag")).
+    if (current().kind == TokKind::Ident &&
+        (ci_equals(current().text, "kv") || ci_equals(current().text, "field")) &&
         index_ + 1 < tokens_.size() &&
         tokens_[index_ + 1].kind == TokKind::LParen) {
-      advance();  // kv
+      const bool is_field_form = ci_equals(current().text, "field");
+      advance();  // kv / field
       advance();  // (
       if (current().kind != TokKind::String) {
-        fail("expected a quoted key inside kv(...)" + describe(current()));
+        fail(std::string("expected a quoted key inside ") +
+             (is_field_form ? "field(...)" : "kv(...)") + describe(current()));
       }
       if (current().text.empty()) {
-        fail("the key inside kv(...) must not be empty");
+        fail(std::string("the key inside ") + (is_field_form ? "field(...)" : "kv(...)") +
+             " must not be empty");
       }
       node->field = Field::Kv;
       node->kv_key = current().text;
       advance();
-      expect(TokKind::RParen, "')' after the kv key");
+      expect(TokKind::RParen, is_field_form ? "')' after the field key"
+                                            : "')' after the kv key");
       advance();
       parse_operator_and_literal(*node);
       return node;
@@ -419,7 +428,7 @@ class Parser {
 
     if (current().kind != TokKind::Ident || kFields.find(to_lower(current().text)) ==
                                                  kFields.end()) {
-      fail("expected a field name (level, msg, src or kv(...))" +
+      fail("expected a field name (level, msg, src, kv(...) or field(...))" +
            (current().kind == TokKind::Ident
                 ? ", got unknown field '" + current().text + "'"
                 : describe(current())));

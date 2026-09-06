@@ -14,9 +14,11 @@
 
 #include "config.h"
 #include "dsl.h"
+#include "glob_source.h"
 #include "kv_extractor.h"
 #include "pipeline.h"
 #include "prom_stats.h"
+#include "source.h"
 #include "stdin_reader.h"
 #include "tailer.h"
 #include "util.h"
@@ -218,26 +220,61 @@ int main(int argc, char** argv) {
     return 3;
   }
 
-  TailOptions options;
-  options.poll_ms = config.tail_poll_ms;
-  options.offset_file = config.offset_file;
-  options.chunk_bytes = config.read_chunk_bytes;  // read.chunk_bytes, pre-validated
-  Tailer tailer(config.input_files, queue, options);
-  tailer.load_offsets();  // resume where a previous run stopped
+  // Wire the input sources behind the ISource abstraction (source.h): every
+  // producer exposes start()/request_stop()/join() and produces RawLine
+  // values into the shared bounded queue. Exactly one source owns the
+  // end-of-stream: the first file-family source (tailer or glob), or stdin
+  // when no file sources are configured.
+  std::vector<std::unique_ptr<ISource>> sources;
+  StdinReader* stdin_reader_ptr = nullptr;
+  {
+    TailOptions options;
+    options.poll_ms = config.tail_poll_ms;
+    options.offset_file = config.offset_file;
+    options.chunk_bytes = config.read_chunk_bytes;  // read.chunk_bytes, pre-validated
 
-  // stdin runs on its own reader thread so the file tailer keeps polling
-  // while standard input blocks waiting for its next line. When no files
-  // are configured the stdin reader is the only producer and therefore
-  // closes the queue at its end of stream.
-  StdinReader stdin_reader(queue, /*close_queue_on_exit=*/config.input_files.empty());
+    std::vector<FileSourceSpec> file_specs;
+    for (const std::filesystem::path& path : config.input_files) {
+      FileSourceSpec spec;
+      spec.path = path;
+      const auto tags_it = config.file_tags.find(normalize_file_key(path));
+      if (tags_it != config.file_tags.end()) spec.tags = tags_it->second;
+      file_specs.push_back(std::move(spec));
+    }
+    if (!file_specs.empty()) {
+      auto tailer = std::make_unique<Tailer>(file_specs, queue, options);
+      tailer->load_offsets();  // resume where a previous run stopped
+      sources.push_back(std::move(tailer));  // file source: closes the queue
+    }
+    for (size_t g = 0; g < config.glob_sources.size(); ++g) {
+      const GlobSourceConfig& glob = config.glob_sources[g];
+      GlobOptions glob_options;
+      glob_options.poll_ms = config.tail_poll_ms;
+      glob_options.offset_file = config.offset_file;
+      glob_options.chunk_bytes = config.read_chunk_bytes;
+      glob_options.exclude = config.glob_exclude;
+      // End-of-stream owner: the first glob when no plain-file tailer exists.
+      const bool close_queue = file_specs.empty() && g == 0;
+      sources.push_back(std::make_unique<GlobSource>(
+          glob.pattern, glob.tags, queue, glob_options, close_queue));
+    }
+    if (config.input_stdin) {
+      auto stdin_reader =
+          std::make_unique<StdinReader>(queue, /*close_queue_on_exit=*/sources.empty(),
+                                        config.stdin_tags);
+      stdin_reader_ptr = stdin_reader.get();
+      sources.push_back(std::move(stdin_reader));
+    }
+  }
+
+  // Per-source-type active gauges (Metrics columns file/stdin/glob).
+  metrics.set_source_type_active("file", config.input_files.empty() ? 0 : 1);
+  metrics.set_source_type_active("glob", config.glob_sources.size());
+  metrics.set_source_type_active("stdin", config.input_stdin ? 1 : 0);
 
   std::signal(SIGINT, handle_stop_signal);
   std::signal(SIGTERM, handle_stop_signal);
-  std::thread reader_thread([&tailer] { tailer.run(); });
-  std::thread stdin_thread;
-  if (config.input_stdin) {
-    stdin_thread = std::thread([&stdin_reader] { stdin_reader.run(); });
-  }
+  for (std::unique_ptr<ISource>& source : sources) source->start();
 
   // Main processing loop; the 200ms pop timeout keeps stop requests responsive.
   uint64_t write_failures = 0;
@@ -247,8 +284,7 @@ int main(int argc, char** argv) {
       stop_reason = reason;
       util::log_info("logpipe: stopping: " + reason);  // shutdown reason for the diag log
     }
-    tailer.request_stop();
-    stdin_reader.request_stop();
+    for (std::unique_ptr<ISource>& source : sources) source->request_stop();
   };
 
   for (;;) {
@@ -266,8 +302,13 @@ int main(int argc, char** argv) {
     if (popped == PopResult::Got) {
       LogRecord record = parser.parse(raw.source, raw.ingested_ms, raw.text);
       metrics.record_input(record.level);
+      metrics.record_source_type_line(source_type_name(raw.source_type));
       if (limiter.allow(util::now_ms())) {
         metrics.record_source_line(record.source);
+        // Start the record's field map with the source-level metadata tags
+        // injected by the producing source (source.<n>.tags); KV extraction
+        // below overwrites on a key clash (KV fields take precedence).
+        std::map<std::string, std::string> merged_fields = raw.fields;
         if (kv_enabled) {
           // Extract "k=v" fields. First try the whole raw line (RAW records
           // are pure key=value payloads); for parsed records fall back to the
@@ -283,13 +324,14 @@ int main(int argc, char** argv) {
                         kv_extractor.extract_tail(record.message, fields);
           }
           if (extracted) {
-            record.fields = std::move(fields);
-            for (const auto& pair : record.fields) {
+            for (const auto& pair : fields) {
+              merged_fields[pair.first] = pair.second;  // KV wins over tags
               metrics.record_kv_value(pair.first, pair.second);
             }
           }
           metrics.record_kv_line(extracted);
         }
+        record.fields = std::move(merged_fields);
         if (filter.passes(record)) {
           uint64_t bytes = 0;
           if (writer->write(record, bytes)) {
@@ -319,20 +361,17 @@ int main(int argc, char** argv) {
     stats_writer.write(metrics.snapshot(/*kv_top_n=*/10));
   }
 
-  tailer.request_stop();  // no-op if already stopping
-  stdin_reader.request_stop();
-  if (stdin_thread.joinable()) stdin_thread.join();
-  reader_thread.join();
-  queue.close();  // safety net; the readers normally close it on their own
-  if (tailer.dropped_lines() > 0) {
-    util::log_debug("logpipe: tailer dropped " + std::to_string(tailer.dropped_lines()) +
-                    " pending line(s) at shutdown");
+  for (std::unique_ptr<ISource>& source : sources) source->request_stop();  // no-op if already stopping
+  for (std::unique_ptr<ISource>& source : sources) source->join();
+  queue.close();  // safety net; the sources normally close it on their own
+  for (std::unique_ptr<ISource>& source : sources) {
+    if (source->dropped_lines() > 0) {
+      util::log_debug("logpipe: source '" + source->name() + "' dropped " +
+                      std::to_string(source->dropped_lines()) +
+                      " pending line(s) at shutdown");
+    }
   }
-  if (config.input_stdin && stdin_reader.dropped_lines() > 0) {
-    util::log_debug("logpipe: stdin reader dropped " + std::to_string(stdin_reader.dropped_lines()) +
-                    " pending line(s) at shutdown");
-  }
-  if (config.input_stdin && stdin_reader.eof()) {
+  if (stdin_reader_ptr != nullptr && stdin_reader_ptr->eof()) {
     util::log_debug("logpipe: stdin source reached end of stream");
   }
   writer->close();

@@ -7,11 +7,15 @@ add_executable(logpipe_tests
   test_fanout.cpp
   test_config2.cpp
   test_buffer_xcrypt.cpp
+  test_sources.cpp
   ../src/config.cpp
   ../src/dsl.cpp
   ../src/kv_extractor.cpp
   ../src/prom_stats.cpp
+  ../src/tail_engine.cpp
   ../src/tailer.cpp
+  ../src/glob_source.cpp
+  ../src/stdin_reader.cpp
   ../src/util.cpp
   ../src/rle.cpp
   ../src/transform.cpp

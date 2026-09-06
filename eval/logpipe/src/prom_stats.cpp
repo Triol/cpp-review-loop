@@ -196,6 +196,29 @@ std::string PromStatsWriter::render(const Metrics::Snapshot& snap) {
                         "output", "Output bytes per named output.",
                         output_bytes);
 
+  // --- per-source-type breakdowns (input source abstraction). ----------------
+  std::vector<std::pair<std::string, uint64_t>> type_lines(
+      snap.source_type_lines.begin(), snap.source_type_lines.end());
+  emit_labelled_counter(out, std::string(kPrefix) + "source_type_lines_total",
+                        "type", "Lines ingested per input source type.",
+                        type_lines);
+  if (!snap.source_type_active.empty()) {
+    out += "# HELP ";
+    out += kPrefix;
+    out += "source_type_active Currently active input sources per type.\n";
+    out += "# TYPE ";
+    out += kPrefix;
+    out += "source_type_active gauge\n";
+    for (const auto& entry : snap.source_type_active) {
+      out += kPrefix;
+      out += "source_type_active{type=\"";
+      out += escape_label(entry.first);
+      out += "\"} ";
+      out += std::to_string(entry.second);
+      out += '\n';
+    }
+  }
+
   // --- KV field-value Top-N statistics. ---------------------------------------
   // Nested map iteration (key asc, then value asc) is deterministic; the
   // snapshot was already trimmed to the configured Top-N by Metrics.

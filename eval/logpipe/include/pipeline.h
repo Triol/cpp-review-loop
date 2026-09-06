@@ -178,11 +178,29 @@ inline const char* output_format_name(OutputFormat format) {
   return format == OutputFormat::JsonLines ? "json_lines" : "text";
 }
 
-// A line as read by the tailer thread, before parsing.
+// Kind of input source a line came from. Drives the per-type Metrics columns
+// (active sources and lines per source type: file/stdin/glob).
+enum class SourceType { File, Stdin, Glob };
+
+inline const char* source_type_name(SourceType type) {
+  switch (type) {
+    case SourceType::File:  return "file";
+    case SourceType::Stdin: return "stdin";
+    case SourceType::Glob:  return "glob";
+  }
+  return "file";
+}
+
+// A line as read by an input source thread, before parsing.
 struct RawLine {
   std::string source;       // input file the line came from
   int64_t ingested_ms = 0;  // read time (via util), used to stamp RAW records
   std::string text;         // line content without the trailing newline
+  // Source-level metadata (source.<n>.tags, see config.h): injected by the
+  // producing source and merged into LogRecord::fields during ingestion;
+  // KV-extracted fields take precedence on a key clash.
+  std::map<std::string, std::string> fields;
+  SourceType source_type = SourceType::File;  // kind of the producing source
 };
 
 // A parsed (or deliberately unparsed) record handed to filter and writer.
@@ -424,6 +442,10 @@ class Metrics {
     // largest number of lines / bytes that sat in the output buffer at once.
     uint64_t buffer_lines_high_water = 0;
     uint64_t buffer_bytes_high_water = 0;
+    // Per-source-type breakdowns (input source abstraction): lines ingested
+    // and currently active source count keyed by "file" / "stdin" / "glob".
+    std::map<std::string, uint64_t> source_type_lines;
+    std::map<std::string, uint64_t> source_type_active;
     std::map<std::string, std::map<std::string, uint64_t>> kv_top_values;
   };
 
@@ -458,6 +480,11 @@ class Metrics {
       std::lock_guard<std::mutex> lock(output_mutex_);
       snap.output_written_lines = output_written_lines_;
       snap.output_written_bytes = output_written_bytes_;
+    }
+    {
+      std::lock_guard<std::mutex> lock(source_type_mutex_);
+      snap.source_type_lines = source_type_lines_;
+      snap.source_type_active = source_type_active_;
     }
     snap.buffer_lines_high_water = buffer_lines_high_water_.load();
     snap.buffer_bytes_high_water = buffer_bytes_high_water_.load();
@@ -512,6 +539,23 @@ class Metrics {
   }
   // Lines dropped because the configured rate limit was exceeded.
   void record_rate_dropped() { rate_dropped_.fetch_add(1, std::memory_order_relaxed); }
+
+  // Per-source-type accounting (input source abstraction): one call per
+  // ingested line with the kind of the producing source ("file", "stdin" or
+  // "glob"), plus the active-source gauge maintained by the wiring layer
+  // (set once after the sources are built; a count of 0 removes the type).
+  void record_source_type_line(const std::string& type) {
+    std::lock_guard<std::mutex> lock(source_type_mutex_);
+    ++source_type_lines_[type];
+  }
+  void set_source_type_active(const std::string& type, uint64_t count) {
+    std::lock_guard<std::mutex> lock(source_type_mutex_);
+    if (count == 0) {
+      source_type_active_.erase(type);
+    } else {
+      source_type_active_[type] = count;
+    }
+  }
 
   // Fan-out accounting (requirement 1): one call per record written to a
   // named output, so each output gets its own lines/bytes columns.
@@ -609,6 +653,21 @@ class Metrics {
       }
     }
     {
+      std::lock_guard<std::mutex> lock(source_type_mutex_);
+      if (!source_type_lines_.empty()) {
+        out << "lines per source type:\n";
+        for (const auto& entry : source_type_lines_) {
+          out << "  " << entry.first << ": " << entry.second << "\n";
+        }
+      }
+      if (!source_type_active_.empty()) {
+        out << "active sources by type:\n";
+        for (const auto& entry : source_type_active_) {
+          out << "  " << entry.first << ": " << entry.second << "\n";
+        }
+      }
+    }
+    {
       std::lock_guard<std::mutex> lock(source_bytes_mutex_);
       if (!source_written_bytes_.empty()) {
         out << "output bytes per source:\n";
@@ -690,6 +749,9 @@ class Metrics {
   mutable std::mutex output_mutex_;  // guards the per-output fan-out counters
   std::map<std::string, uint64_t> output_written_lines_;
   std::map<std::string, uint64_t> output_written_bytes_;
+  mutable std::mutex source_type_mutex_;  // guards the per-type counters
+  std::map<std::string, uint64_t> source_type_lines_;
+  std::map<std::string, uint64_t> source_type_active_;
   // KV extraction accounting; the (key, value) counter map feeds the Top-N
   // field-value statistics exported through the Prometheus writer.
   std::atomic<uint64_t> kv_lines_attempted_{0};

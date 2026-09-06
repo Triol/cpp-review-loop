@@ -1,10 +1,12 @@
-// stdin_reader.cpp - implementation of the standard-input line source: one
-// blocking getline per line, pushed onto the shared bounded queue.
+// stdin_reader.cpp - the standard-input ISource implementation: one blocking
+// getline per line, pushed onto the shared bounded queue.
 
 #include "stdin_reader.h"
 
 #include <iostream>
 #include <string>
+#include <thread>
+#include <utility>
 
 #include "util.h"
 
@@ -15,8 +17,19 @@ constexpr char kSourceName[] = "stdin";
 
 }  // namespace
 
-StdinReader::StdinReader(BlockingQueue<RawLine>& queue, bool close_queue_on_exit)
-    : queue_(queue), close_queue_on_exit_(close_queue_on_exit) {}
+StdinReader::StdinReader(BlockingQueue<RawLine>& queue, bool close_queue_on_exit,
+                         SourceTags tags)
+    : queue_(queue), close_queue_on_exit_(close_queue_on_exit), tags_(std::move(tags)) {}
+
+void StdinReader::start() {
+  // At most one producer thread per instance; a second start() is a no-op.
+  if (started_.exchange(true, std::memory_order_relaxed)) return;
+  thread_ = std::thread([this] { run(); });
+}
+
+void StdinReader::join() {
+  if (thread_.joinable()) thread_.join();
+}
 
 void StdinReader::run() {
   util::log_info("stdin reader: started");
@@ -33,6 +46,8 @@ void StdinReader::run() {
     raw.source = kSourceName;
     raw.ingested_ms = util::now_ms();  // time via the util module (team convention)
     raw.text = line;
+    raw.fields = tags_;                          // source-level metadata injection
+    raw.source_type = SourceType::Stdin;         // per-type Metrics accounting
 
     bool pushed = false;
     while (!stop_.load(std::memory_order_relaxed)) {
@@ -54,6 +69,7 @@ void StdinReader::run() {
   util::log_info(std::string("stdin reader: stopped (") +
                  (eof_.load(std::memory_order_relaxed) ? "end of input" : "stop requested") +
                  ")");
+  done_.store(true, std::memory_order_relaxed);
 }
 
 }  // namespace logpipe

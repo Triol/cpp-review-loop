@@ -24,6 +24,8 @@
 //   logpipe_kv_extraction_ratio                    gauge (0-100 percent)
 //   logpipe_source_lines_total{source="..."}       counter (per input source)
 //   logpipe_source_output_bytes_total{source="..."} counter (per input source)
+//   logpipe_source_type_lines_total{type="..."}    counter (per source type)
+//   logpipe_source_type_active{type="..."}         gauge (active sources)
 //   logpipe_field_value_count{key="...",value="..."} counter (KV Top-N stats)
 //
 // The exporter itself is single-threaded (main-thread use); Metrics::snapshot

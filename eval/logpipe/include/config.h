@@ -11,11 +11,20 @@
 
 #include "dsl.h"       // FilterExpr (compiled filter.expr)
 #include "pipeline.h"  // Level, OutputFormat, CompressMode
+#include "tail_engine.h"  // SourceTags (source-level metadata)
 #include "transform.h" // TransformStep, TransformPosition
 #include "util.h"      // DiagLevel
 #include "writer.h"    // CompressMode
 
 namespace logpipe {
+
+// One glob directory source (input.files entry "glob:<pattern>", see
+// glob_source.h). `tags` comes from the matching source.<n>.tags key and is
+// injected into every line the source emits.
+struct GlobSourceConfig {
+  std::string pattern;  // e.g. "/var/log/app/*.log"
+  SourceTags tags;      // source-level metadata for every matched file
+};
 
 // One named output of the fan-out group (requirement: multiple named outputs
 // with independent file/format/compress/filter/level/transform settings).
@@ -58,6 +67,25 @@ struct Config {
   // enables standard input as an additional source instead of a file.
   std::vector<std::filesystem::path> input_files;
   bool input_stdin = false;  // "stdin:" seen in input.files
+
+  // Glob directory sources: input.files entries spelled "glob:<pattern>"
+  // (e.g. glob:/var/log/app/*.log). Discovered files are tailed dynamically;
+  // files that disappear are retired, newly created matches are picked up.
+  std::vector<GlobSourceConfig> glob_sources;
+  // glob.exclude: comma-separated glob patterns; a matched candidate that
+  // matches any exclude pattern is never tailed.
+  std::vector<std::string> glob_exclude;
+
+  // Source-level metadata (source.<n>.tags = k1=v1,k2=v2, 1-based index of
+  // the input.files entry in declaration order). Injected into every line's
+  // RawLine fields by the producing source; KV extraction wins on a key
+  // clash. Bare tags (without '=') are stored as <tag>="true".
+  std::map<std::string, SourceTags> file_tags;  // normalized path -> tags
+  SourceTags stdin_tags;                        // tags of the "stdin:" entry
+  // Load-time state (consumed by Config::load finalization): the input
+  // entries in declaration order and the tags parsed for their 1-based index.
+  std::vector<std::string> input_entry_specs;
+  std::map<int, SourceTags> source_tags;
 
   // Rolling output: active file is output_dir/output_file; rotation keeps at
   // most rotate_backups files of rotate_size_bytes each.

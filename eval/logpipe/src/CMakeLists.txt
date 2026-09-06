@@ -7,7 +7,9 @@ add_executable(logpipe
   dsl.cpp
   kv_extractor.cpp
   prom_stats.cpp
+  tail_engine.cpp
   tailer.cpp
+  glob_source.cpp
   stdin_reader.cpp
   transform.cpp
   writer.cpp

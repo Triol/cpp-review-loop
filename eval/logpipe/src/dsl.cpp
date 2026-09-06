@@ -122,12 +122,12 @@ struct CompareNode : ExprNode {
 
  private:
   // Level comparisons use severity ordinals; a literal that is not a known
-  // level name is rejected at compile time (see parser), so this is total.
+  // level name (built-in or registered custom level) is rejected at compile
+  // time (see parser), so this is total.
   bool eval_level(const LogRecord& rec) const {
-    Level other = Level::Debug;
-    if (!level_from_string(literal, other)) return false;
+    int want = 0;
+    if (!level_token_to_int(literal, want)) return false;
     const int have = static_cast<int>(rec.level);
-    const int want = static_cast<int>(other);
     switch (op) {
       case Op::Eq: return have == want;
       case Op::Ne: return have != want;
@@ -462,11 +462,15 @@ class Parser {
     // Semantic checks that need the literal (compile-time, with position of
     // the literal approximated by the current position).
     if (node.field == Field::Level) {
-      Level parsed_level;
-      if (!level_from_string(node.literal, parsed_level) ||
-          parsed_level == Level::Raw) {
+      int parsed_level_value = 0;
+      // Built-in RAW is not accepted in expressions (it marks unparsed lines);
+      // registered custom levels participate like built-in names.
+      Level builtin;
+      const bool is_builtin_raw =
+          level_from_string(node.literal, builtin) && builtin == Level::Raw;
+      if (is_builtin_raw || !level_token_to_int(node.literal, parsed_level_value)) {
         fail("unknown level name \"" + node.literal +
-             "\" (expected DEBUG, INFO, WARN or ERROR)");
+             "\" (expected DEBUG, INFO, WARN, ERROR or a registered custom level)");
       }
     }
     if (node.op == Op::Matches) {

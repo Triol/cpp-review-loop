@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -35,6 +36,20 @@ struct OutputConfig {
   std::string transform_text;       // raw transform chain spec
   std::vector<TransformStep> transform;  // parsed chain (empty = none)
   TransformPosition transform_position = TransformPosition::After;
+};
+
+// Where one effective configuration key obtained its value from. The source
+// tag is one of "file", "profile:<name>", "env" or "default" and feeds the
+// --check-config report (see check_config_report).
+struct ConfigEntry {
+  std::string value;   // the applied (or effective) value as text
+  std::string source;  // provenance tag, e.g. "file", "profile:fast", "env"
+};
+
+// Options for Config::load. `use_env = false` disables the LOGPIPE_<KEY>
+// environment-variable override mechanism (command line: --no-env).
+struct LoadOptions {
+  bool use_env = true;
 };
 
 struct Config {
@@ -115,9 +130,21 @@ struct Config {
   util::DiagLevel diag_level = util::DiagLevel::Info;
   std::string diag_file;  // empty = stderr
 
+  // Provenance of every key that was explicitly set while loading: maps the
+  // configuration key to its applied value and source tag ("file",
+  // "profile:<name>" or "env"). Keys missing here fall back to their
+  // built-in defaults (source "default" in the --check-config report).
+  std::map<std::string, ConfigEntry> effective;
+
   // Parses `path`; throws std::runtime_error with a descriptive message on
   // I/O or validation problems.
-  static Config load(const std::string& path);
+  static Config load(const std::string& path) {
+    return load(path, LoadOptions{});
+  }
+
+  // As above, with explicit load options (--no-env turns the environment
+  // override layer off).
+  static Config load(const std::string& path, const LoadOptions& options);
 
   // One-line dump for the startup diagnostic message.
   std::string describe() const;
@@ -128,5 +155,14 @@ struct Config {
 // is testable without spawning a process); the stdout variant used by the
 // switch simply passes stdout.
 int dump_config(std::FILE* out, const Config& config);
+
+// Writes the --check-config report for `config` (loaded from `path`) to `out`
+// and returns 0: one fixed-width table row per known configuration key with
+// the effective value and its provenance ("file", "profile:<name>", "env" or
+// "default"). Keys that were never set show their built-in default value.
+// The load itself (including DSL compilation and validation) has already
+// happened by the time this runs, so a returned 0 means the configuration is
+// fully valid.
+int check_config_report(std::FILE* out, const std::string& path, const Config& config);
 
 }  // namespace logpipe

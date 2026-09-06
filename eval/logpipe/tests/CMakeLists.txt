@@ -5,6 +5,7 @@ add_executable(logpipe_tests
   test_dsl.cpp
   test_features.cpp
   test_fanout.cpp
+  test_config2.cpp
   ../src/config.cpp
   ../src/dsl.cpp
   ../src/kv_extractor.cpp

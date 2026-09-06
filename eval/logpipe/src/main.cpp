@@ -46,32 +46,55 @@ int main(int argc, char** argv) {
 
   util::init_diag(util::DiagLevel::Info, "");  // stderr until the config is loaded
 
-  // Command line: logpipe [config-file] [--dump-config]. The flag may appear
-  // before or after the config path; --dump-config loads the configuration
-  // (so validation errors still abort with exit code 2), prints describe()
-  // to stdout and exits 0 without touching any input or output file.
+  // Command line: logpipe [config-file] [--dump-config] [--check-config]
+  // [--no-env]. Flags may appear before or after the config path;
+  // --dump-config loads the configuration (so validation errors still abort
+  // with exit code 2), prints describe() to stdout and exits 0 without
+  // touching any input or output file. --check-config additionally compiles
+  // every DSL expression, then prints the per-key report table and exits 0.
+  // --no-env disables the LOGPIPE_<KEY> environment override layer.
   bool dump_only = false;
+  bool check_only = false;
+  bool use_env = true;
   std::string config_path = "logpipe.conf";
   bool config_path_seen = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--dump-config") {
       dump_only = true;
+    } else if (arg == "--check-config") {
+      check_only = true;
+    } else if (arg == "--no-env") {
+      use_env = false;
     } else if (!config_path_seen) {
       config_path = arg;
       config_path_seen = true;
     } else {
-      util::log_error("usage: logpipe [config-file] [--dump-config]");
+      util::log_error(
+          "usage: logpipe [config-file] [--dump-config] [--check-config] [--no-env]");
       return 2;
     }
   }
 
   Config config;
   try {
-    config = Config::load(config_path);
+    LoadOptions load_options;
+    load_options.use_env = use_env;
+    config = Config::load(config_path, load_options);
   } catch (const std::exception& error) {
     util::log_error(std::string("logpipe: cannot start: ") + error.what());
     return 2;
+  }
+
+  if (check_only) {
+    // Full load/validation/DSL compilation already happened above; print the
+    // per-key effective-value report and exit without touching any file.
+    const int rc = check_config_report(stdout, config_path, config);
+    if (rc != 0) {
+      util::log_error("logpipe: --check-config could not write to stdout");
+      return 5;
+    }
+    return 0;
   }
 
   if (dump_only) {

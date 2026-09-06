@@ -59,6 +59,105 @@ inline bool level_from_string(const std::string& text, Level& out) {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// Custom level registry (config: level.register.<NAME> = <numeric value>).
+//
+// Registrations are global and process-wide: a name registered while the
+// configuration is loaded immediately becomes usable as
+//  - a filter.level / output.<N>.level threshold value,
+//  - the level word inside ingested lines (the parser accepts it), and
+//  - a level literal in filter.expr DSL comparisons.
+// Values may range 1..999 and therefore interoperate with the built-in
+// severity ordinals (DEBUG=0 .. ERROR=3): threshold comparison is a plain
+// integer comparison, so a custom level sits exactly where its number puts
+// it relative to the built-in levels.
+// ---------------------------------------------------------------------------
+class LevelRegistry {
+ public:
+  static constexpr int kMinCustomValue = 1;
+  static constexpr int kMaxCustomValue = 999;
+
+  static LevelRegistry& instance() {
+    static LevelRegistry registry;
+    return registry;
+  }
+
+  // Registers `name` (case-insensitive; stored uppercase) with `value`.
+  // Returns false and fills `error` when the value is out of range, the name
+  // is a built-in level name/alias, or the name is already registered with a
+  // different value (re-registering the same name+value is idempotent).
+  bool register_level(const std::string& name, int value, std::string& error) {
+    if (value < kMinCustomValue || value > kMaxCustomValue) {
+      error = "custom level value must be between " +
+              std::to_string(kMinCustomValue) + " and " +
+              std::to_string(kMaxCustomValue) + ", got " + std::to_string(value);
+      return false;
+    }
+    std::string upper = to_upper(name);
+    if (upper.empty()) {
+      error = "custom level name must not be empty";
+      return false;
+    }
+    Level builtin;
+    if (level_from_string(upper, builtin)) {
+      error = "'" + upper + "' is a built-in level name";
+      return false;
+    }
+    const auto it = custom_.find(upper);
+    if (it != custom_.end()) {
+      if (it->second == value) return true;  // idempotent re-registration
+      error = "'" + upper + "' is already registered with value " +
+              std::to_string(it->second);
+      return false;
+    }
+    custom_[upper] = value;
+    return true;
+  }
+
+  // Looks up a registered custom level by (case-insensitive) name.
+  bool lookup(const std::string& name, int& value) const {
+    const auto it = custom_.find(to_upper(name));
+    if (it == custom_.end()) return false;
+    value = it->second;
+    return true;
+  }
+
+  // True when `upper` (already uppercase) is a registered custom level.
+  bool has(const std::string& upper) const {
+    return custom_.find(upper) != custom_.end();
+  }
+
+  // Test hook: drops every registration so tests start from a clean slate.
+  void clear() { custom_.clear(); }
+
+ private:
+  static std::string to_upper(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    for (char c : text) {
+      out.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+    }
+    return out;
+  }
+
+  std::map<std::string, int> custom_;  // uppercase name -> numeric value
+};
+
+// Resolves a level token to its numeric severity: built-in names and aliases
+// first (DEBUG/TRACE/INFO/NOTICE/WARN/WARNING/ERROR/ERR/FATAL/CRITICAL/CRIT/
+// RAW), then the custom levels registered through LevelRegistry. Returns
+// false for unknown tokens. Custom tokens map to their registered value,
+// which may exceed the built-in Raw ordinal (that is fine: all threshold
+// comparisons go through the numeric value).
+inline bool level_token_to_int(const std::string& text, int& value) {
+  Level builtin;
+  if (level_from_string(text, builtin)) {
+    value = static_cast<int>(builtin);
+    return true;
+  }
+  return LevelRegistry::instance().lookup(text, value);
+}
+
 // Output line format: human-readable text (default) or one JSON object per
 // line. Selected via the output_format configuration key.
 enum class OutputFormat { Text, JsonLines };
@@ -185,10 +284,21 @@ class LogParser {
     rec.ingested_ms = ingested_ms;
     std::smatch match;
     if (std::regex_match(line, match, line_re_)) {
-      Level level;
-      if (level_from_string(match[2].str(), level)) {
+      Level builtin;
+      int level_value = 0;
+      const bool is_builtin = level_from_string(match[2].str(), builtin);
+      if (is_builtin) {
         rec.parsed = true;
-        rec.level = level;
+        rec.level = builtin;
+        rec.timestamp_text = match[1].str();
+        rec.message = match[3].str();
+        return rec;
+      }
+      if (LevelRegistry::instance().lookup(match[2].str(), level_value)) {
+        // Registered custom level word: carries its numeric severity; all
+        // downstream comparisons use the integer value (see Level).
+        rec.parsed = true;
+        rec.level = static_cast<Level>(level_value);
         rec.timestamp_text = match[1].str();
         rec.message = match[3].str();
         return rec;
@@ -356,7 +466,13 @@ class Metrics {
   }
 
   void record_input(Level level) {
-    level_counts_[static_cast<int>(level)].fetch_add(1, std::memory_order_relaxed);
+    // Custom levels (level.register.*) may carry numeric values beyond the
+    // built-in Raw ordinal; clamp them into the top counter bucket so the
+    // fixed-size per-level array stays in bounds.
+    int index = static_cast<int>(level);
+    if (index < 0) index = 0;
+    if (index >= kLevelCount) index = kLevelCount - 1;
+    level_counts_[index].fetch_add(1, std::memory_order_relaxed);
     ingested_.fetch_add(1, std::memory_order_relaxed);
   }
   void record_filtered() { filtered_.fetch_add(1, std::memory_order_relaxed); }

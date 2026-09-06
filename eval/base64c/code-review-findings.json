@@ -1,0 +1,101 @@
+{
+  "review": {
+    "repo": "eval/base64c",
+    "scope": "whole repo（7 文件 / 551 行，2 轮迭代）",
+    "coverage": "覆盖：2 个维度批次（正确性/错误处理、一致性/魔数/构建）由 2 个独立 subagent 分头深读，主 agent 抽查核实；未覆盖：性能维度（项目体量与用途裁定省略）、未做跨编译器验证、tests 断言与 RFC 向量的逐条比对"
+  },
+  "summary": "base64c 实现紧凑正确：核心 decode_impl 状态机（填充位掩码、%4==1、URL-safe 补位）经逐行核查无缺陷，93→117 项测试覆盖 RFC 向量与错误路径。需要关注的三件事：一是 decode_mime 的错误位置指向剥离后的字符串，违反头文件『position 是输入串下标』的契约；二是截断类错误的 position 口径不一（size()-1 与 size() 混用，后者越界）；三是 MIME 行宽 76 以裸字面量散布 3 处。均为 Minor/Nit 级，无 Blocker/Major。",
+  "systemic": [],
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "Minor",
+      "category": "错误处理",
+      "file": "src/base64c.cpp",
+      "line": 178,
+      "title": "decode_mime 的错误位置指向过滤后的字符串，违反头文件契约",
+      "detail": "base64c.hpp 承诺 decode_error::position 是输入串下标，但 decode_mime 先剥离 \\r\\n 再调 decode_impl(filtered)，抛出的 position 是 filtered 的下标（decode/decode_lenient 路径均为原始下标，此处偏离自身约定）。",
+      "fix": "decode_impl 改为循环内跳过 \\r\\n 并记录原始下标（同 decode_lenient 的 skip_ws 模式），或传入下标映射，保证 position 可直接索引原始输入。"
+    },
+    {
+      "id": "F2",
+      "severity": "Minor",
+      "category": "错误处理",
+      "file": "src/base64c.cpp",
+      "line": 151,
+      "title": "截断类错误的 position 口径不一致且部分越界（size()-1 与 size() 混用）",
+      "detail": "decode_impl 用 size()-1，decode_urlsafe 的 len%4==1 用 size()（对长度 1 的输入 position=1 越界）；同类错误两种口径，调用方无法稳定使用。",
+      "fix": "统一约定（建议截断类 = 输入末尾，文档写明『截断时 position == size()』），两处保持一致并更新头文件注释。"
+    },
+    {
+      "id": "F3",
+      "severity": "Nit",
+      "category": "正确性",
+      "file": "src/base64c.cpp",
+      "line": 171,
+      "title": "decode_mime 额外丢弃孤立的 \\r / \\n，超出头文件文档承诺",
+      "detail": "头文件只承诺忽略 \\r\\n，实现还静默丢弃孤立 \\r 与 \\n——放松了严格性，与同层 decode 风格不一致。",
+      "fix": "只删成对 \\r\\n、孤立 \\r 交给严格路径报错；或修改头文件注释明确所有 CR/LF 均忽略。"
+    },
+    {
+      "id": "F4",
+      "severity": "Minor",
+      "category": "一致性/命名",
+      "file": "include/base64c/base64c.hpp",
+      "line": 13,
+      "title": "公共类型命名风格不一致：decode_error（snake_case）vs Base64Encoder（PascalCase）",
+      "detail": "仅有的两个公共类型两种风格，函数/成员/常量风格均已统一，唯独类型层无主导可循，且都暴露在公共 API 上。",
+      "fix": "统一为 PascalCase（DecodeError）并留别名过渡，或反向统一；全库仅 3 个使用点。"
+    },
+    {
+      "id": "F5",
+      "severity": "Nit",
+      "category": "魔数",
+      "file": "src/base64c.cpp",
+      "line": 60,
+      "title": "MIME 行宽 76 无名，散布 3 处（60/65/74）",
+      "detail": "76 是自实现的换行策略参数（源自 RFC 2045），调整行宽需同步 3 处，漏改即静默错位（RFC 位宽/掩码类域常量已正确排除）。",
+      "fix": "匿名 namespace 定义 constexpr std::size_t kMimeLineLength = 76; 三处替换。"
+    },
+    {
+      "id": "F6",
+      "severity": "Nit",
+      "category": "魔数",
+      "file": "src/base64c.cpp",
+      "line": 17,
+      "title": "0xFF 双重语义：反向表哨兵值与字节掩码共用同一字面量",
+      "detail": "位掩码用法的 0xFF 属域常量，但 17 行将其同时用作 ReverseTable 的『无效字符』哨兵（136-138 判断），两种语义耦合在同一魔法值上。",
+      "fix": "定义 constexpr std::uint8_t kInvalidSextet = 0xFF; 仅用于哨兵语义，掩码处保持 0xFFu 加注释。"
+    },
+    {
+      "id": "F7",
+      "severity": "Minor",
+      "category": "构建卫生",
+      "file": "src/CMakeLists.txt",
+      "line": 3,
+      "title": "警告标志覆盖不均：base64c_demo 无任何告警选项；全项目无 -Werror",
+      "detail": "-Wall -Wextra 只加在库与 tests，demo 未设置；无 -Werror（或窄口径），新告警不阻断构建。警告类零运行时代价。",
+      "fix": "为 demo 补 -Wall -Wextra；或定义 INTERFACE warnings 目标统一链接；CI 可加窄口径 -Werror=return-type 等。"
+    },
+    {
+      "id": "F8",
+      "severity": "Minor",
+      "category": "构建加固",
+      "file": "CMakeLists.txt",
+      "line": 1,
+      "title": "加固/消毒选项未启用（建议，去留由用户决定）",
+      "detail": "无 -fstack-protector-strong、_GLIBCXX_ASSERTIONS、_FORTIFY_SOURCE=2，dev/CI 无 -fsanitize=address,undefined（约 2x CPU / 2-3x 内存，严禁上 release）；MSVC 侧 /sdl、/guard:cf、/permissive- 未设。本库处理任意二进制输入，解码路径值得开启。",
+      "fix": "check_cxx_compiler_flag 逐项探测后按 target 追加；sanitizer 仅挂 tests/CI 构建，不动默认构建。"
+    },
+    {
+      "id": "F9",
+      "severity": "Nit",
+      "category": "构建卫生",
+      "file": "src/CMakeLists.txt",
+      "line": 2,
+      "title": "include 路径用 ../ 相对拼接而非 ${PROJECT_SOURCE_DIR}",
+      "detail": "依赖『src 的父目录』隐式布局，目录被移动或作为子目录引入时路径假设脆弱。",
+      "fix": "改为 ${PROJECT_SOURCE_DIR}/include。"
+    }
+  ]
+}

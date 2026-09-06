@@ -70,6 +70,20 @@ std::vector<std::string> split_list(const std::string& value) {
   return items;
 }
 
+// Accepts the usual boolean spellings; false is returned (with ok=false) for
+// anything else so the caller can raise a descriptive error.
+bool parse_bool(const std::string& value, bool& out) {
+  if (value == "true" || value == "1" || value == "yes" || value == "on") {
+    out = true;
+    return true;
+  }
+  if (value == "false" || value == "0" || value == "no" || value == "off") {
+    out = false;
+    return true;
+  }
+  return false;
+}
+
 }  // namespace
 
 Config Config::load(const std::string& path) {
@@ -119,6 +133,21 @@ Config Config::load(const std::string& path) {
       if (!output_format_from_string(value, config.output_format)) {
         throw std::runtime_error(
             "config: 'output_format' expects text or json_lines, got '" + value + "'");
+      }
+    } else if (key == "output.compress") {
+      if (!compress_mode_from_string(value, config.output_compress)) {
+        throw std::runtime_error(
+            "config: 'output.compress' expects none or rle, got '" + value + "'");
+      }
+    } else if (key == "rotate.daily" || key == "rotate_daily") {
+      if (!parse_bool(value, config.rotate_daily)) {
+        throw std::runtime_error("config: 'rotate.daily' expects true or false, got '" +
+                                 value + "'");
+      }
+    } else if (key == "per_source_files") {
+      if (!parse_bool(value, config.per_source_files)) {
+        throw std::runtime_error("config: 'per_source_files' expects true or false, got '" +
+                                 value + "'");
       }
     } else if (key == "max_lines_per_sec") {
       config.max_lines_per_sec = parse_int(key, value, 0, 100000000);
@@ -172,6 +201,9 @@ std::string Config::describe() const {
   }
   out << "] output_dir=" << output_dir.string() << " output_file=" << output_base
       << " format=" << output_format_name(output_format)
+      << " compress=" << compress_mode_name(output_compress)
+      << " daily_rotation=" << (rotate_daily ? "on" : "off")
+      << " per_source_files=" << (per_source_files ? "on" : "off")
       << " rotate=" << rotate_size_bytes << "B x" << rotate_backups
       << " level>=" << level_name(level_threshold)
       << " keyword=" << (keyword.empty() ? "<none>" : keyword)

@@ -266,9 +266,27 @@ class Metrics {
     ingested_.fetch_add(1, std::memory_order_relaxed);
   }
   void record_filtered() { filtered_.fetch_add(1, std::memory_order_relaxed); }
-  void record_written(uint64_t bytes) {
+  // bytes: line/frame size on disk; source: the input source of the record
+  // (per-source output byte totals for the summary).
+  void record_written(uint64_t bytes, const std::string& source) {
     written_lines_.fetch_add(1, std::memory_order_relaxed);
     written_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(source_bytes_mutex_);
+    source_written_bytes_[source] += bytes;
+  }
+  // Compressed output accounting: raw bytes fed to the encoder and the
+  // resulting on-disk payload bytes (frame incl. container header).
+  void record_compression(uint64_t raw_bytes, uint64_t packed_bytes) {
+    compress_raw_bytes_.fetch_add(raw_bytes, std::memory_order_relaxed);
+    compress_packed_bytes_.fetch_add(packed_bytes, std::memory_order_relaxed);
+  }
+  // Output file rotations; counted separately by trigger (size / day).
+  void record_rotation(bool by_size) {
+    if (by_size) {
+      rotations_by_size_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      rotations_by_day_.fetch_add(1, std::memory_order_relaxed);
+    }
   }
   // Lines admitted past the rate limit, counted per input source
   // (source = file path, or "stdin" for the standard-input source).
@@ -278,6 +296,12 @@ class Metrics {
   }
   // Lines dropped because the configured rate limit was exceeded.
   void record_rate_dropped() { rate_dropped_.fetch_add(1, std::memory_order_relaxed); }
+
+  // Read-only accessors for the new counters (used by tests and the writer).
+  uint64_t compressed_raw_bytes() const { return compress_raw_bytes_.load(); }
+  uint64_t compressed_packed_bytes() const { return compress_packed_bytes_.load(); }
+  uint64_t rotations_by_size() const { return rotations_by_size_.load(); }
+  uint64_t rotations_by_day() const { return rotations_by_day_.load(); }
 
   std::string summary(int64_t start_ms) const {
     std::ostringstream out;
@@ -291,12 +315,27 @@ class Metrics {
     out << "lines filtered : " << filtered_.load() << "\n"
         << "lines written  : " << written_lines_.load() << "\n"
         << "output bytes   : " << written_bytes_.load() << "\n"
+        << "compress raw bytes   : " << compress_raw_bytes_.load() << "\n"
+        << "compress packed bytes: " << compress_packed_bytes_.load() << "\n"
+        << "rotations by size : " << rotations_by_size_.load() << "\n"
+        << "rotations by day  : " << rotations_by_day_.load() << "\n"
         << "lines rate-dropped : " << rate_dropped_.load() << "\n";
-    std::lock_guard<std::mutex> lock(source_mutex_);
-    if (!source_counts_.empty()) {
-      out << "lines per source:\n";
-      for (const auto& entry : source_counts_) {
-        out << "  " << entry.first << ": " << entry.second << "\n";
+    {
+      std::lock_guard<std::mutex> lock(source_mutex_);
+      if (!source_counts_.empty()) {
+        out << "lines per source:\n";
+        for (const auto& entry : source_counts_) {
+          out << "  " << entry.first << ": " << entry.second << "\n";
+        }
+      }
+    }
+    {
+      std::lock_guard<std::mutex> lock(source_bytes_mutex_);
+      if (!source_written_bytes_.empty()) {
+        out << "output bytes per source:\n";
+        for (const auto& entry : source_written_bytes_) {
+          out << "  " << entry.first << ": " << entry.second << "\n";
+        }
       }
     }
     return out.str();
@@ -309,8 +348,14 @@ class Metrics {
   std::atomic<uint64_t> written_lines_{0};
   std::atomic<uint64_t> written_bytes_{0};
   std::atomic<uint64_t> rate_dropped_{0};
+  std::atomic<uint64_t> compress_raw_bytes_{0};
+  std::atomic<uint64_t> compress_packed_bytes_{0};
+  std::atomic<uint64_t> rotations_by_size_{0};
+  std::atomic<uint64_t> rotations_by_day_{0};
   mutable std::mutex source_mutex_;  // guards source_counts_
   std::map<std::string, uint64_t> source_counts_;
+  mutable std::mutex source_bytes_mutex_;  // guards source_written_bytes_
+  std::map<std::string, uint64_t> source_written_bytes_;
 };
 
 }  // namespace logpipe

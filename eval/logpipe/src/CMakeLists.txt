@@ -2,6 +2,7 @@
 add_executable(logpipe
   main.cpp
   util.cpp
+  rle.cpp
   config.cpp
   tailer.cpp
   stdin_reader.cpp

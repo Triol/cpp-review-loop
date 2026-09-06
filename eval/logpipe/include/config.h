@@ -7,8 +7,9 @@
 #include <string>
 #include <vector>
 
-#include "pipeline.h"  // Level
+#include "pipeline.h"  // Level, OutputFormat, CompressMode
 #include "util.h"      // DiagLevel
+#include "writer.h"    // CompressMode
 
 namespace logpipe {
 
@@ -29,6 +30,16 @@ struct Config {
   // Output line format: text (default) or json_lines (one single-line JSON
   // object per record with ts, level, source, message and crc fields).
   OutputFormat output_format = OutputFormat::Text;
+
+  // output.compress: "none" (default) or "rle" (self-implemented run-length
+  // encoding; compressed files carry a ".rle" extension).
+  CompressMode output_compress = CompressMode::None;
+  // Rotate the output when the calendar date changes (date-stamped names);
+  // coexists with the size trigger (either one rotates).
+  bool rotate_daily = false;
+  // per_source_files: write each input source into its own output file
+  // (file names embed a sanitized form of the source identifier).
+  bool per_source_files = false;
 
   // Filtering: minimum level (DEBUG < INFO < WARN < ERROR) and an optional
   // case-insensitive keyword (empty disables it).

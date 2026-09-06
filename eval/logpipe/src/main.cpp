@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -66,9 +67,20 @@ int main(int argc, char** argv) {
   LogFilter filter(config.level_threshold, config.keyword);
   RateLimiter limiter(config.max_lines_per_sec);
   Metrics metrics;
-  RollingWriter writer(config.output_dir, config.output_base, config.rotate_size_bytes,
-                       config.rotate_backups, config.output_format);
-  if (!writer.open()) {
+  WriterOptions writer_options;
+  writer_options.output_dir = config.output_dir;
+  writer_options.base_name = config.output_base;
+  writer_options.max_bytes_per_file = config.rotate_size_bytes;
+  writer_options.max_backups = config.rotate_backups;
+  writer_options.format = config.output_format;
+  writer_options.compress = config.output_compress;
+  writer_options.daily_rotation = config.rotate_daily;
+  writer_options.per_source_files = config.per_source_files;
+  const std::unique_ptr<OutputSink> writer =
+      config.per_source_files
+          ? std::unique_ptr<OutputSink>(new PerSourceWriter(writer_options, &metrics))
+          : std::unique_ptr<OutputSink>(new RollingWriter(writer_options, &metrics));
+  if (!writer->open()) {
     util::log_error("logpipe: cannot start: output file is not writable");
     return 3;
   }
@@ -124,8 +136,8 @@ int main(int argc, char** argv) {
         metrics.record_source_line(record.source);
         if (filter.passes(record)) {
           uint64_t bytes = 0;
-          if (writer.write(record, bytes)) {
-            metrics.record_written(bytes);
+          if (writer->write(record, bytes)) {
+            metrics.record_written(bytes, record.source);
           } else {
             ++write_failures;
             break;  // disk trouble: stop cleanly and keep what we have
@@ -158,8 +170,8 @@ int main(int argc, char** argv) {
   if (config.input_stdin && stdin_reader.eof()) {
     util::log_debug("logpipe: stdin source reached end of stream");
   }
-  writer.close();
-  if (writer.failed()) ++write_failures;  // flush on close lost data: report exit code 4
+  writer->close();
+  if (writer->failed()) ++write_failures;  // flush on close lost data: report exit code 4
 
   if (write_failures > 0) {
     util::log_error("logpipe: stopped after " + std::to_string(write_failures) +

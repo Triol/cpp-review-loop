@@ -1,8 +1,10 @@
 // writer.cpp - implementation of the rolling output writer: backup-chain
-// shifting, CRC32 stamping via util, timestamped fallback rotation names.
+// shifting, CRC32 stamping via util, timestamped fallback rotation names,
+// per-line RLE compression frames, daily rotation and per-source dispatch.
 
 #include "writer.h"
 
+#include <cctype>
 #include <cstdio>
 #include <sstream>
 #include <system_error>
@@ -43,46 +45,106 @@ std::string json_escape(const std::string& text) {
   return out;
 }
 
+// Local calendar date "YYYYMMDD" for an epoch-ms timestamp, going through the
+// util module's formatting so all time handling stays in one place.
+std::string date_of(int64_t epoch_ms) {
+  const std::string stamp = util::timestamp_compact(epoch_ms);  // YYYYMMDD_HHMMSS
+  return stamp.substr(0, 8);
+}
+
+// Turns an input source into a filename-safe fragment: the file-name part of
+// a path with every non-alphanumeric character (including '.') mapped to '_',
+// so the configured extension is appended exactly once.
+std::string sanitize_source(const std::string& source) {
+  const std::filesystem::path path(source);
+  std::string name = path.filename().string();
+  if (name.empty()) name = "stdin";
+  std::string out;
+  out.reserve(name.size());
+  for (const char c : name) {
+    const unsigned char uc = static_cast<unsigned char>(c);
+    const bool safe = std::isalnum(uc) || c == '-' || c == '_';
+    out.push_back(safe ? static_cast<char>(uc) : '_');
+  }
+  return out;
+}
+
+void append_u32_le(std::string& out, uint32_t value) {
+  out.push_back(static_cast<char>(value & 0xFFu));
+  out.push_back(static_cast<char>((value >> 8) & 0xFFu));
+  out.push_back(static_cast<char>((value >> 16) & 0xFFu));
+  out.push_back(static_cast<char>((value >> 24) & 0xFFu));
+}
+
+bool read_u32_le(const std::string& data, size_t offset, uint32_t& value) {
+  if (data.size() < offset + 4) return false;
+  value = 0;
+  for (int index = 3; index >= 0; --index) {
+    value = (value << 8) |
+            static_cast<uint32_t>(static_cast<unsigned char>(data[offset + index]));
+  }
+  return true;
+}
+
 }  // namespace
 
-RollingWriter::RollingWriter(std::filesystem::path output_dir, std::string base_name,
-                             uint64_t max_bytes_per_file, int max_backups,
-                             OutputFormat format)
-    : dir_(std::move(output_dir)),
-      base_(std::move(base_name)),
-      max_bytes_(max_bytes_per_file),
-      max_backups_(max_backups),
-      format_(format) {
-  const std::filesystem::path base_path(base_);
+RollingWriter::RollingWriter(const WriterOptions& options, Metrics* metrics)
+    : options_(options), metrics_(metrics) {
+  const std::filesystem::path base_path(options_.base_name);
   stem_ = base_path.stem().string();
   ext_ = base_path.extension().string();
   if (stem_.empty()) {  // degenerate base such as ".log"
-    stem_ = base_;
+    stem_ = options_.base_name;
     ext_.clear();
   }
+  // Compressed output always carries the .rle extension in addition to the
+  // configured one so consumers can tell the encodings apart by name.
+  if (options_.compress == CompressMode::Rle) ext_ += ".rle";
+  if (!options_.clock) options_.clock = util::now_ms;
 }
 
-std::filesystem::path RollingWriter::active_path() const { return dir_ / base_; }
+std::string RollingWriter::date_suffix() const {
+  return date_of(options_.clock());
+}
+
+std::string RollingWriter::active_file_name() const { return active_name_; }
+
+std::filesystem::path RollingWriter::active_path() const {
+  return options_.output_dir / active_name_;
+}
 
 std::filesystem::path RollingWriter::backup_path(int index) const {
-  return dir_ / (stem_ + "_" + std::to_string(index) + ext_);
+  // Backups chain off the current active name so size rotation works for
+  // both the plain and the date-stamped naming scheme.
+  const std::filesystem::path active(active_name_);
+  return options_.output_dir /
+         (active.stem().string() + "_" + std::to_string(index) + active.extension().string());
 }
 
 bool RollingWriter::open() {
   std::error_code ec;
-  std::filesystem::create_directories(dir_, ec);
+  std::filesystem::create_directories(options_.output_dir, ec);
   if (ec) {
-    util::log_error("writer: cannot create output directory '" + dir_.string() +
-                    "': " + ec.message());
+    util::log_error("writer: cannot create output directory '" +
+                    options_.output_dir.string() + "': " + ec.message());
     return false;
   }
 
-  // Preserve whatever a previous run left in the active file.
-  ec.clear();
-  const uintmax_t existing = std::filesystem::file_size(active_path(), ec);
-  if (!ec && existing > 0) {
-    util::log_info("writer: found previous output file, rotating it into the backup chain");
-    if (!rotate()) return false;
+  current_date_ = date_suffix();
+  if (options_.daily_rotation) {
+    // The date is baked into the active name; a previous run left files with
+    // older dates, which simply stay where they are.
+    active_name_ = stem_ + "_" + current_date_ + ext_;
+  } else {
+    // stem_/ext_ already include the possible ".rle" suffix.
+    active_name_ = stem_ + ext_;
+    // Preserve whatever a previous run left in the active file.
+    ec.clear();
+    const uintmax_t existing = std::filesystem::file_size(active_path(), ec);
+    if (!ec && existing > 0) {
+      util::log_info("writer: found previous output file, rotating it into the backup chain");
+      if (!rotate()) return false;
+    }
   }
   return open_active();
 }
@@ -96,6 +158,7 @@ bool RollingWriter::open_active() {
     return false;
   }
   file_bytes_ = 0;  // rotation always hands us a fresh file in append mode
+  current_date_ = date_suffix();
   util::log_info("writer: active output file '" + active_path().string() + "'");
   return true;
 }
@@ -107,10 +170,10 @@ bool RollingWriter::rotate() {
   // 1. drop the oldest backup, 2. shift the chain by one, 3. archive the
   // active file as the new _1.
   std::error_code ec;
-  if (max_backups_ >= 1) {
-    std::filesystem::remove(backup_path(max_backups_), ec);  // may not exist: fine
+  if (options_.max_backups >= 1) {
+    std::filesystem::remove(backup_path(options_.max_backups), ec);  // may not exist: fine
   }
-  for (int index = max_backups_ - 1; index >= 1; --index) {
+  for (int index = options_.max_backups - 1; index >= 1; --index) {
     const std::filesystem::path from = backup_path(index);
     ec.clear();
     std::filesystem::rename(from, backup_path(index + 1), ec);
@@ -126,7 +189,8 @@ bool RollingWriter::rotate() {
     // Fall back to a timestamped name (time obtained through the util module)
     // so one stuck backup cannot wedge the whole pipeline.
     const std::filesystem::path fallback =
-        dir_ / (stem_ + "_1_" + util::timestamp_compact(util::now_ms()) + ext_);
+        options_.output_dir /
+        (active_name_ + "_1_" + util::timestamp_compact(util::now_ms()));
     ec.clear();
     std::filesystem::rename(active_path(), fallback, ec);
     if (ec) {
@@ -135,9 +199,18 @@ bool RollingWriter::rotate() {
     }
     util::log_warn("writer: used fallback name '" + fallback.string() + "'");
   }
-  ++rotations_;
-  util::log_info("writer: rotated output (" + std::to_string(rotations_) +
-                 " rotation(s) so far)");
+  if (metrics_ != nullptr) metrics_->record_rotation(/*by_size=*/true);
+  util::log_info("writer: rotated output (size trigger)");
+  return true;
+}
+
+bool RollingWriter::rotate_daily() {
+  // The active file already carries its date in the name, so archiving is
+  // just closing it; the next open_active() picks the new date's name.
+  out_.close();
+  out_.clear();
+  if (metrics_ != nullptr) metrics_->record_rotation(/*by_size=*/false);
+  util::log_info("writer: rotated output (day change, new date " + current_date_ + ")");
   return true;
 }
 
@@ -165,23 +238,55 @@ std::string RollingWriter::format_json_line(const LogRecord& rec) const {
   return body + suffix;
 }
 
+std::string RollingWriter::encode_payload(const std::string& line) const {
+  if (options_.compress != CompressMode::Rle) return line;
+  const std::string container = rle::compress(line);
+  std::string frame;
+  frame.reserve(container.size() + 4);
+  append_u32_le(frame, static_cast<uint32_t>(container.size()));
+  frame += container;
+  return frame;
+}
+
 bool RollingWriter::write(const LogRecord& rec, uint64_t& bytes_written) {
+  // Daily rotation first: a date change always starts a fresh file, even if
+  // the size trigger would fire for the same line as well.
+  if (options_.daily_rotation) {
+    const std::string today = date_suffix();
+    if (out_.is_open() && today != current_date_) {
+      rotate_daily();
+      active_name_ = stem_ + "_" + today + ext_;
+      if (!open_active()) return false;
+    }
+  }
+
   const std::string line =
-      format_ == OutputFormat::JsonLines ? format_json_line(rec) : format_line(rec);
+      options_.format == OutputFormat::JsonLines ? format_json_line(rec) : format_line(rec);
+  const std::string payload = encode_payload(line);
+  const uint64_t on_disk = payload.size() +
+                           (options_.compress == CompressMode::Rle ? 0u : 1u /* newline */);
   // Rotate before the active file would exceed the size limit. A single line
   // larger than the limit is still written whole (logs must not be split).
-  if (out_.is_open() && file_bytes_ > 0 && file_bytes_ + line.size() + 1 > max_bytes_) {
+  if (out_.is_open() && file_bytes_ > 0 && file_bytes_ + on_disk > options_.max_bytes_per_file) {
     if (!rotate()) return false;
+    active_name_ = options_.daily_rotation ? stem_ + "_" + current_date_ + ext_
+                                           : stem_ + ext_;
     if (!open_active()) return false;
   }
-  out_ << line << '\n';
+  if (options_.compress == CompressMode::Rle) {
+    out_.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+  } else {
+    out_ << payload << '\n';
+  }
   if (!out_.good()) {
     util::log_error("writer: write to '" + active_path().string() + "' failed");
     return false;
   }
-  const uint64_t written = line.size() + 1;
-  file_bytes_ += written;
-  bytes_written = written;
+  if (metrics_ != nullptr && options_.compress == CompressMode::Rle) {
+    metrics_->record_compression(line.size(), payload.size());
+  }
+  file_bytes_ += on_disk;
+  bytes_written = on_disk;
   return true;
 }
 
@@ -194,6 +299,78 @@ void RollingWriter::close() {
     }
     out_.close();
   }
+}
+
+// ------------------------------ PerSourceWriter ------------------------------
+
+PerSourceWriter::PerSourceWriter(const WriterOptions& options, Metrics* metrics)
+    : options_(options), metrics_(metrics) {}
+
+bool PerSourceWriter::open() {
+  // Sinks are created lazily per source in sink_for(); nothing to do here.
+  return true;
+}
+
+RollingWriter& PerSourceWriter::sink_for(const LogRecord& rec) {
+  auto it = sinks_.find(rec.source);
+  if (it != sinks_.end()) return *it->second;
+  // Per-source base name: <stem>_<sanitized source><ext>. The sanitized
+  // fragment is the file-name part of the path, safe for filenames.
+  const std::filesystem::path base_path(options_.base_name);
+  std::string stem = base_path.stem().string();
+  if (stem.empty()) stem = options_.base_name;
+  WriterOptions opts = options_;
+  opts.base_name = stem + "_" + sanitize_source(rec.source) + base_path.extension().string();
+  auto sink = std::make_unique<RollingWriter>(opts, metrics_);
+  RollingWriter& ref = *sink;
+  sinks_.emplace(rec.source, std::move(sink));
+  return ref;
+}
+
+bool PerSourceWriter::write(const LogRecord& rec, uint64_t& bytes_written) {
+  RollingWriter& sink = sink_for(rec);
+  if (!sink.is_open()) {
+    if (!sink.open()) {
+      any_failed_ = true;
+      return false;
+    }
+  }
+  return sink.write(rec, bytes_written);
+}
+
+void PerSourceWriter::close() {
+  for (auto& entry : sinks_) entry.second->close();
+}
+
+bool PerSourceWriter::failed() const {
+  if (any_failed_) return true;
+  for (const auto& entry : sinks_) {
+    if (entry.second->failed()) return true;
+  }
+  return false;
+}
+
+// --------------------------- compressed file reader --------------------------
+
+bool read_compressed_output(const std::filesystem::path& path, std::string& out) {
+  out.clear();
+  std::ifstream in(path, std::ios::binary);
+  if (!in.is_open()) return false;
+  std::string packed((std::istreambuf_iterator<char>(in)),
+                     std::istreambuf_iterator<char>());
+  size_t offset = 0;
+  while (offset < packed.size()) {
+    uint32_t frame_size = 0;
+    if (!read_u32_le(packed, offset, frame_size)) return false;
+    offset += 4;
+    if (frame_size == 0 || packed.size() - offset < frame_size) return false;
+    std::string line;
+    if (!rle::decompress(packed.substr(offset, frame_size), line)) return false;
+    out += line;
+    out += '\n';
+    offset += frame_size;
+  }
+  return true;
 }
 
 }  // namespace logpipe

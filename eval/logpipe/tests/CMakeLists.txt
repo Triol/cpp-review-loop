@@ -1,10 +1,12 @@
-# Minimal zero-dependency test runner. The sources under test (tailer, util)
-# are compiled straight into the test binary; the rest of logpipe is headers.
+# Minimal zero-dependency test runner. The sources under test (tailer, util,
+# config, rle, writer) are compiled straight into the test binary.
 add_executable(logpipe_tests
   test_main.cpp
   ../src/config.cpp
   ../src/tailer.cpp
-  ../src/util.cpp)
+  ../src/util.cpp
+  ../src/rle.cpp
+  ../src/writer.cpp)
 
 target_include_directories(logpipe_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 

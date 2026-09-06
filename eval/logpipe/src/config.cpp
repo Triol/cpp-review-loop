@@ -157,6 +157,8 @@ const std::vector<std::string>& known_keys() {
       "filter.keyword",     "filter.expr",        "tail.poll_ms",
       "state.offset_file",  "run.duration_sec",   "stop_file",
       "diag.level",         "diag.file",          "active_profile",
+      "write.buffer_lines", "write.buffer_bytes", "encrypt.password",
+      "read.chunk_bytes",   "queue.capacity",
   };
   return keys;
 }
@@ -419,6 +421,26 @@ void apply_entry(Config& config, const RawEntry& entry, bool& inputs_reset) {
       throw std::runtime_error("config: 'per_source_files' expects true or false, got '" +
                                value + "'");
     }
+  } else if (key == "write.buffer_lines") {
+    config.write_buffer_lines = parse_u64(key, value);
+    if (config.write_buffer_lines > 100000000ull) {
+      throw std::runtime_error("config: 'write.buffer_lines' must be at most 100000000");
+    }
+  } else if (key == "write.buffer_bytes") {
+    config.write_buffer_bytes = parse_u64(key, value);
+    if (config.write_buffer_bytes > (1ull << 30)) {
+      throw std::runtime_error("config: 'write.buffer_bytes' must be at most 1073741824");
+    }
+  } else if (key == "encrypt.password") {
+    // The password is stored for the writer but never echoed: the effective
+    // map only ever carries the masked form.
+    config.encrypt_password = value;
+    record("***");
+    return;
+  } else if (key == "read.chunk_bytes") {
+    config.read_chunk_bytes = parse_int(key, value, 128, 1048576);
+  } else if (key == "queue.capacity") {
+    config.queue_capacity = parse_int(key, value, 1, 1000000);
   } else if (key == "max_lines_per_sec") {
     config.max_lines_per_sec = parse_int(key, value, 0, 100000000);
   } else if (key == "extract.kv" || key == "extract_kv") {
@@ -483,6 +505,12 @@ std::string effective_value_of(const Config& config, const std::string& key) {
   if (key == "output.compress") return compress_mode_name(config.output_compress);
   if (key == "rotate.daily" || key == "rotate_daily") return bool_text(config.rotate_daily);
   if (key == "per_source_files") return bool_text(config.per_source_files);
+  if (key == "write.buffer_lines") return std::to_string(config.write_buffer_lines);
+  if (key == "write.buffer_bytes") return std::to_string(config.write_buffer_bytes);
+  // Secret: only the masked form ever reaches a report or a dump.
+  if (key == "encrypt.password") return config.encrypt_password.empty() ? "<off>" : "***";
+  if (key == "read.chunk_bytes") return std::to_string(config.read_chunk_bytes);
+  if (key == "queue.capacity") return std::to_string(config.queue_capacity);
   if (key == "max_lines_per_sec") return std::to_string(config.max_lines_per_sec);
   if (key == "extract.kv" || key == "extract_kv") return bool_text(config.extract_kv);
   if (key == "stats.interval_sec") return std::to_string(config.stats_interval_sec);
@@ -645,8 +673,10 @@ Config Config::load(const std::string& path, const LoadOptions& options) {
   for (const RawEntry& entry : ordered) {
     if (entry.key.rfind("level.register.", 0) == 0) continue;
     if (entry.source == "env") {
+      // The password is a secret: its value is masked even in the override log.
+      const bool secret = entry.key == "encrypt.password";
       util::log_info("config: " + entry.origin + " overrides '" + entry.key + "' = '" +
-                     entry.value + "'");
+                     (secret ? std::string("***") : entry.value) + "'");
     }
     apply_entry(config, entry, inputs_reset);
   }
@@ -744,6 +774,11 @@ std::string Config::describe() const {
                            : std::string("off"))
       << " poll_ms=" << tail_poll_ms << " offsets="
       << (offset_file.empty() ? "<off>" : offset_file.string())
+      << " write_buffer=[lines=" << write_buffer_lines
+      << " bytes=" << write_buffer_bytes << "]"
+      << " read_chunk_bytes=" << read_chunk_bytes
+      << " queue_capacity=" << queue_capacity
+      << " encrypt_password=" << (encrypt_password.empty() ? "<off>" : "***")
       << " stop_file=" << (stop_file.empty() ? "<off>" : stop_file.string())
       << " duration_sec=" << run_duration_sec;
   // Fan-out group dump: one bracketed entry per configured output.

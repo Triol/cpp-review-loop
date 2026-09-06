@@ -10,7 +10,8 @@ add_executable(logpipe
   tailer.cpp
   stdin_reader.cpp
   transform.cpp
-  writer.cpp)
+  writer.cpp
+  xcrypt.cpp)
 
 target_include_directories(logpipe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 

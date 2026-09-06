@@ -98,8 +98,10 @@ RollingWriter::RollingWriter(const WriterOptions& options, Metrics* metrics)
     ext_.clear();
   }
   // Compressed output always carries the .rle extension in addition to the
-  // configured one so consumers can tell the encodings apart by name.
+  // configured one so consumers can tell the encodings apart by name; the
+  // encrypted container adds .enc on top (compress -> encrypt order).
   if (options_.compress == CompressMode::Rle) ext_ += ".rle";
+  if (!options_.encrypt_password.empty()) ext_ += ".enc";
   if (!options_.clock) options_.clock = util::now_ms;
 }
 
@@ -121,6 +123,10 @@ std::filesystem::path RollingWriter::backup_path(int index) const {
          (active.stem().string() + "_" + std::to_string(index) + active.extension().string());
 }
 
+bool RollingWriter::buffering_enabled() const {
+  return options_.buffer_lines > 0 || options_.buffer_bytes > 0;
+}
+
 bool RollingWriter::open() {
   std::error_code ec;
   std::filesystem::create_directories(options_.output_dir, ec);
@@ -128,6 +134,19 @@ bool RollingWriter::open() {
     util::log_error("writer: cannot create output directory '" +
                     options_.output_dir.string() + "': " + ec.message());
     return false;
+  }
+
+  // Make the crash-loss window of the write buffer explicit in the diag log:
+  // everything still in memory when the process dies is never written.
+  if (buffering_enabled()) {
+    util::log_warn(
+        "writer: write buffering enabled (lines=" +
+        std::to_string(options_.buffer_lines) + " bytes=" +
+        std::to_string(options_.buffer_bytes) +
+        "): a crash may lose up to this much buffered output");
+  }
+  if (!options_.encrypt_password.empty()) {
+    util::log_info("writer: encrypted output enabled (password masked)");
   }
 
   current_date_ = date_suffix();
@@ -159,11 +178,59 @@ bool RollingWriter::open_active() {
   }
   file_bytes_ = 0;  // rotation always hands us a fresh file in append mode
   current_date_ = date_suffix();
+  // Encrypted output: every file carries its own header and restarts the
+  // keystream at offset 0, so each file decrypts independently.
+  if (!options_.encrypt_password.empty()) {
+    // The whole container (header included) is XOR-encrypted with the
+    // keystream starting at file offset 0, so xcrypt::decrypt_container()
+    // (and read_output_file()) reverse the file directly. A fresh stream per
+    // file keeps the keystream aligned with the file offsets after rotation.
+    cipher_ = std::make_unique<xcrypt::XorStream>(options_.encrypt_password);
+    std::string header =
+        std::string(xcrypt::kMagic, 4) + static_cast<char>(xcrypt::kVersion);
+    cipher_->apply(header);
+    out_.write(header.data(), static_cast<std::streamsize>(header.size()));
+    if (!out_.good()) {
+      util::log_error("writer: cannot write encryption header to '" +
+                      active_path().string() + "'");
+      return false;
+    }
+  }
   util::log_info("writer: active output file '" + active_path().string() + "'");
   return true;
 }
 
+// Spills the in-memory buffer into the active stream. Called when a buffering
+// threshold is crossed, before any rotation, and at close(); leaves the
+// buffer empty on success.
+bool RollingWriter::flush_buffer() {
+  if (buffer_.empty()) return true;
+  for (const std::string& chunk : buffer_) {
+    out_.write(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+  }
+  const uint64_t spilled_bytes = buffered_bytes_;
+  const size_t spilled_lines = buffer_.size();
+  buffer_.clear();
+  buffered_bytes_ = 0;
+  if (!out_.good()) {
+    util::log_error("writer: buffered flush to '" + active_path().string() +
+                    "' failed, " + std::to_string(spilled_lines) +
+                    " buffered line(s) may be lost");
+    return false;
+  }
+  out_.flush();  // a threshold flush must reach the OS, not the stream buffer
+  if (!out_.good()) {
+    util::log_error("writer: buffered flush to '" + active_path().string() +
+                    "' failed on flush, " + std::to_string(spilled_lines) +
+                    " buffered line(s) may be lost");
+    return false;
+  }
+  file_bytes_ += spilled_bytes;
+  return true;
+}
+
 bool RollingWriter::rotate() {
+  if (!flush_buffer()) return false;  // nothing may straddle a rotation
   out_.close();
   out_.clear();
 
@@ -207,6 +274,7 @@ bool RollingWriter::rotate() {
 bool RollingWriter::rotate_daily() {
   // The active file already carries its date in the name, so archiving is
   // just closing it; the next open_active() picks the new date's name.
+  if (!flush_buffer()) return false;  // spill pending lines into the old day
   out_.close();
   out_.clear();
   if (metrics_ != nullptr) metrics_->record_rotation(/*by_size=*/false);
@@ -239,13 +307,28 @@ std::string RollingWriter::format_json_line(const LogRecord& rec) const {
 }
 
 std::string RollingWriter::encode_payload(const std::string& line) const {
-  if (options_.compress != CompressMode::Rle) return line;
-  const std::string container = rle::compress(line);
-  std::string frame;
-  frame.reserve(container.size() + 4);
-  append_u32_le(frame, static_cast<uint32_t>(container.size()));
-  frame += container;
-  return frame;
+  // One full on-disk chunk: either the RLE frame stream entry or the line
+  // plus its newline. When encryption is enabled the WHOLE chunk (framing
+  // and newline included) is encrypted as one unit, so the file is a single
+  // continuous keystream from offset 0 after the header and decrypts with
+  // xcrypt::decrypt_container() / read_output_file() without any gaps.
+  std::string chunk;
+  if (options_.compress == CompressMode::Rle) {
+    const std::string container = rle::compress(line);
+    chunk.reserve(container.size() + 4);
+    append_u32_le(chunk, static_cast<uint32_t>(container.size()));
+    chunk += container;
+  } else {
+    chunk = line;
+    chunk.push_back('\n');
+  }
+  if (!options_.encrypt_password.empty()) {
+    if (!cipher_) {
+      cipher_ = std::make_unique<xcrypt::XorStream>(options_.encrypt_password);
+    }
+    cipher_->apply(chunk);  // continues the keystream across chunks
+  }
+  return chunk;
 }
 
 bool RollingWriter::write(const LogRecord& rec, uint64_t& bytes_written) {
@@ -254,7 +337,7 @@ bool RollingWriter::write(const LogRecord& rec, uint64_t& bytes_written) {
   if (options_.daily_rotation) {
     const std::string today = date_suffix();
     if (out_.is_open() && today != current_date_) {
-      rotate_daily();
+      if (!rotate_daily()) return false;
       active_name_ = stem_ + "_" + today + ext_;
       if (!open_active()) return false;
     }
@@ -262,35 +345,54 @@ bool RollingWriter::write(const LogRecord& rec, uint64_t& bytes_written) {
 
   const std::string line =
       options_.format == OutputFormat::JsonLines ? format_json_line(rec) : format_line(rec);
-  const std::string payload = encode_payload(line);
-  const uint64_t on_disk = payload.size() +
-                           (options_.compress == CompressMode::Rle ? 0u : 1u /* newline */);
-  // Rotate before the active file would exceed the size limit. A single line
+  const std::string chunk = encode_payload(line);
+  const uint64_t on_disk = chunk.size();
+  // Rotate before the active file would exceed the size limit; bytes still
+  // sitting in the buffer count toward the limit because they are flushed
+  // (into the current file) before the rotation happens. A single line
   // larger than the limit is still written whole (logs must not be split).
-  if (out_.is_open() && file_bytes_ > 0 && file_bytes_ + on_disk > options_.max_bytes_per_file) {
+  const uint64_t pending = file_bytes_ + buffered_bytes_;
+  if (out_.is_open() && pending > 0 && pending + on_disk > options_.max_bytes_per_file) {
+    if (!flush_buffer()) return false;
     if (!rotate()) return false;
     active_name_ = options_.daily_rotation ? stem_ + "_" + current_date_ + ext_
                                            : stem_ + ext_;
     if (!open_active()) return false;
   }
-  if (options_.compress == CompressMode::Rle) {
-    out_.write(payload.data(), static_cast<std::streamsize>(payload.size()));
-  } else {
-    out_ << payload << '\n';
+
+  // Enter the in-memory buffer with the exact on-disk bytes; flushed when a
+  // threshold is crossed, on rotation, or at close().
+  buffer_.push_back(chunk);
+  buffered_bytes_ += on_disk;
+  if (metrics_ != nullptr) {
+    metrics_->record_buffer_watermark(buffer_.size(),
+                                      static_cast<uint64_t>(buffered_bytes_));
   }
-  if (!out_.good()) {
-    util::log_error("writer: write to '" + active_path().string() + "' failed");
-    return false;
+
+  // Crossed a buffering threshold (or no buffering configured at all): spill.
+  const bool lines_trigger =
+      options_.buffer_lines > 0 && buffer_.size() >= options_.buffer_lines;
+  const bool bytes_trigger =
+      options_.buffer_bytes > 0 && buffered_bytes_ >= options_.buffer_bytes;
+  const bool unbuffered = options_.buffer_lines == 0 && options_.buffer_bytes == 0;
+  if (lines_trigger || bytes_trigger || unbuffered) {
+    if (!flush_buffer()) return false;
   }
+
   if (metrics_ != nullptr && options_.compress == CompressMode::Rle) {
-    metrics_->record_compression(line.size(), payload.size());
+    metrics_->record_compression(line.size(), chunk.size());
   }
-  file_bytes_ += on_disk;
   bytes_written = on_disk;
   return true;
 }
 
 void RollingWriter::close() {
+  // Shutdown flushes whatever is still buffered; a failure here means the
+  // tail of the buffered output was lost.
+  if (!flush_buffer()) {
+    failed_ = true;
+    util::log_error("writer: final buffer flush on close failed, data may be lost");
+  }
   if (out_.is_open()) {
     out_.flush();
     if (!out_) {
@@ -444,6 +546,43 @@ bool read_compressed_output(const std::filesystem::path& path, std::string& out)
     if (frame_size == 0 || packed.size() - offset < frame_size) return false;
     std::string line;
     if (!rle::decompress(packed.substr(offset, frame_size), line)) return false;
+    out += line;
+    out += '\n';
+    offset += frame_size;
+  }
+  return true;
+}
+
+// Reverses the writer's encoding chain for one output file: XOR decryption
+// (LXEF container) first when a password is given, then the RLE frame stream
+// when the output was compressed.
+bool read_output_file(const std::filesystem::path& path,
+                      const std::string& password, bool compressed,
+                      std::string& out) {
+  out.clear();
+  std::ifstream in(path, std::ios::binary);
+  if (!in.is_open()) return false;
+  std::string raw((std::istreambuf_iterator<char>(in)),
+                  std::istreambuf_iterator<char>());
+  std::string payload;
+  if (!password.empty()) {
+    if (!xcrypt::decrypt_container(password, raw, payload)) return false;
+  } else {
+    payload = std::move(raw);
+  }
+  if (!compressed) {
+    out = std::move(payload);
+    return true;
+  }
+  // RLE frame stream: identical framing to read_compressed_output().
+  size_t offset = 0;
+  while (offset < payload.size()) {
+    uint32_t frame_size = 0;
+    if (!read_u32_le(payload, offset, frame_size)) return false;
+    offset += 4;
+    if (frame_size == 0 || payload.size() - offset < frame_size) return false;
+    std::string line;
+    if (!rle::decompress(payload.substr(offset, frame_size), line)) return false;
     out += line;
     out += '\n';
     offset += frame_size;

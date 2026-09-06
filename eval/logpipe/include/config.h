@@ -80,6 +80,27 @@ struct Config {
   // (file names embed a sanitized form of the source identifier).
   bool per_source_files = false;
 
+  // write.buffer_lines / write.buffer_bytes: formatted output accumulates in
+  // an in-memory buffer inside the writer and is flushed to the file when
+  // either threshold is crossed, on rotation, or at shutdown. 0 disables the
+  // respective threshold; both 0 = unbuffered (every line goes straight to
+  // the stream). A crash can lose whatever is still buffered, which the
+  // writer calls out in the diag log when buffering is enabled.
+  uint64_t write_buffer_lines = 0;
+  uint64_t write_buffer_bytes = 0;
+
+  // encrypt.password: non-empty enables the lightweight XOR keystream
+  // container on the output files (applied after compression). The password
+  // itself is a secret: diagnostics and --dump-config/--check-config output
+  // only ever show it masked as "***".
+  std::string encrypt_password;
+
+  // read.chunk_bytes: size of one read() block while tailing input files
+  // (bounds-checked: 128..1048576). queue.capacity: capacity of the
+  // reader-to-main BlockingQueue in lines (bounds-checked: 1..1000000).
+  int read_chunk_bytes = 8192;
+  int queue_capacity = 1024;
+
   // Filtering: minimum level (DEBUG < INFO < WARN < ERROR) and an optional
   // case-insensitive keyword (empty disables it).
   Level level_threshold = Level::Info;

@@ -420,6 +420,10 @@ class Metrics {
     // keyed by the configured output name.
     std::map<std::string, uint64_t> output_written_lines;
     std::map<std::string, uint64_t> output_written_bytes;
+    // Write-buffer high-water marks (requirement: buffer statistics): the
+    // largest number of lines / bytes that sat in the output buffer at once.
+    uint64_t buffer_lines_high_water = 0;
+    uint64_t buffer_bytes_high_water = 0;
     std::map<std::string, std::map<std::string, uint64_t>> kv_top_values;
   };
 
@@ -455,6 +459,8 @@ class Metrics {
       snap.output_written_lines = output_written_lines_;
       snap.output_written_bytes = output_written_bytes_;
     }
+    snap.buffer_lines_high_water = buffer_lines_high_water_.load();
+    snap.buffer_bytes_high_water = buffer_bytes_high_water_.load();
     {
       std::lock_guard<std::mutex> lock(kv_mutex_);
       snap.kv_top_values = kv_value_counts_;
@@ -513,6 +519,30 @@ class Metrics {
     std::lock_guard<std::mutex> lock(output_mutex_);
     ++output_written_lines_[output_name];
     output_written_bytes_[output_name] += bytes;
+  }
+
+  // Write-buffer high-water marks (batched write buffering): the writer
+  // reports the current buffer occupancy after every append and only the
+  // maxima are kept. Lock-free atomic max loop.
+  void record_buffer_watermark(uint64_t lines, uint64_t bytes) {
+    uint64_t cur = buffer_lines_high_water_.load(std::memory_order_relaxed);
+    while (lines > cur &&
+           !buffer_lines_high_water_.compare_exchange_weak(
+               cur, lines, std::memory_order_relaxed)) {
+    }
+    cur = buffer_bytes_high_water_.load(std::memory_order_relaxed);
+    while (bytes > cur &&
+           !buffer_bytes_high_water_.compare_exchange_weak(
+               cur, bytes, std::memory_order_relaxed)) {
+    }
+  }
+
+  // Read-only accessors for the buffer high-water marks (tests and summary).
+  uint64_t buffer_lines_high_water() const {
+    return buffer_lines_high_water_.load(std::memory_order_relaxed);
+  }
+  uint64_t buffer_bytes_high_water() const {
+    return buffer_bytes_high_water_.load(std::memory_order_relaxed);
   }
 
   // KV extraction accounting (extract.kv = true): one record_kv_line call per
@@ -649,6 +679,10 @@ class Metrics {
   std::atomic<uint64_t> compress_packed_bytes_{0};
   std::atomic<uint64_t> rotations_by_size_{0};
   std::atomic<uint64_t> rotations_by_day_{0};
+  // Write-buffer high-water marks (batched write buffer statistics); updated
+  // with a CAS loop so concurrent writers cannot lower a watermark.
+  std::atomic<uint64_t> buffer_lines_high_water_{0};
+  std::atomic<uint64_t> buffer_bytes_high_water_{0};
   mutable std::mutex source_mutex_;  // guards source_counts_
   std::map<std::string, uint64_t> source_counts_;
   mutable std::mutex source_bytes_mutex_;  // guards source_written_bytes_

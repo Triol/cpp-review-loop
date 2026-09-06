@@ -16,7 +16,7 @@
 namespace logpipe {
 namespace {
 
-constexpr size_t kReadChunkSize = 8192;  // bytes per read() while tailing
+constexpr int kDefaultReadChunkSize = 8192;  // bytes per read() while tailing
 
 // Canonical identity of a file for the offset state file.
 std::string normalize_key(const std::filesystem::path& path) {
@@ -28,6 +28,10 @@ std::string normalize_key(const std::filesystem::path& path) {
 Tailer::Tailer(std::vector<std::filesystem::path> paths, BlockingQueue<RawLine>& queue,
                const TailOptions& options)
     : queue_(queue), options_(options) {
+  // read.chunk_bytes sanity: fall back to the default for non-positive values
+  // (config.cpp already bounds-checks the parsed value, this protects direct
+  // construction from code that bypasses the config layer).
+  if (options_.chunk_bytes <= 0) options_.chunk_bytes = kDefaultReadChunkSize;
   for (const auto& path : paths) {
     const std::string key = normalize_key(path);
     bool duplicate = false;
@@ -148,19 +152,20 @@ void Tailer::handle_truncation(FileState& file) {
 
 void Tailer::poll_file(FileState& file) {
   if (!ensure_open(file)) return;
-  char buffer[kReadChunkSize];
+  // One read block of the configured size per poll round (read.chunk_bytes).
+  std::vector<char> buffer(static_cast<size_t>(options_.chunk_bytes));
   while (!stop_.load(std::memory_order_relaxed)) {
     // A short read at EOF sets eofbit|failbit; without clearing it the sentry
     // makes every later read a silent no-op and appended lines are lost.
     file.stream.clear();
-    file.stream.read(buffer, sizeof(buffer));
+    file.stream.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
     const std::streamsize got = file.stream.gcount();
     if (got <= 0) break;
 
     // Split what we read into complete lines. The trailing partial line
     // stays in `pending` and is NOT counted into the offset yet, so a crash
     // never loses the position of an unterminated line.
-    file.pending.append(buffer, static_cast<size_t>(got));
+    file.pending.append(buffer.data(), static_cast<size_t>(got));
     size_t consumed = 0;
     size_t newline = file.pending.find('\n');
     while (newline != std::string::npos) {

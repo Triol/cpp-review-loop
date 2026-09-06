@@ -17,6 +17,9 @@ struct TailOptions {
   int poll_ms = 500;                  // delay between polls
   std::filesystem::path offset_file;  // empty = do not persist offsets
   int offset_save_sec = 10;           // periodic checkpoint interval
+  // read.chunk_bytes: bytes per read() while tailing (config-driven, bounds
+  // checked in config.cpp); non-positive values fall back to the default.
+  int chunk_bytes = 8192;
 };
 
 // Reads all configured input files in tail mode and pushes complete lines

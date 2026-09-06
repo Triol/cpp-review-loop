@@ -6,6 +6,7 @@ add_executable(logpipe_tests
   test_features.cpp
   test_fanout.cpp
   test_config2.cpp
+  test_buffer_xcrypt.cpp
   ../src/config.cpp
   ../src/dsl.cpp
   ../src/kv_extractor.cpp
@@ -14,8 +15,9 @@ add_executable(logpipe_tests
   ../src/util.cpp
   ../src/rle.cpp
   ../src/transform.cpp
-  ../src/writer.cpp)
-
+  ../src/writer.cpp
+  ../src/xcrypt.cpp
+)
 target_include_directories(logpipe_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 
 # GCC < 9 needs an explicit link for std::filesystem.

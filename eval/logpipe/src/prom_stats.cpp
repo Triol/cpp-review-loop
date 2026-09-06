@@ -146,6 +146,14 @@ std::string PromStatsWriter::render(const Metrics::Snapshot& snap) {
                         "trigger", "Output file rotations by trigger.",
                         rotation_samples);
 
+  // --- write buffer high-water marks (batched-write buffer statistics). ------
+  emit_gauge(out, std::string(kPrefix) + "write_buffer_lines_high_water",
+             "Largest number of lines held in the output write buffer at once.",
+             snap.buffer_lines_high_water);
+  emit_gauge(out, std::string(kPrefix) + "write_buffer_bytes_high_water",
+             "Largest number of bytes held in the output write buffer at once.",
+             snap.buffer_bytes_high_water);
+
   // --- KV extraction accounting. ---------------------------------------------
   emit_counter(out, std::string(kPrefix) + "kv_lines_attempted_total",
                "Lines offered to the KV extractor.", snap.kv_lines_attempted);

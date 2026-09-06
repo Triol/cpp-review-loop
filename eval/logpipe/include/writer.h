@@ -16,6 +16,7 @@
 #include "pipeline.h"
 #include "rle.h"
 #include "transform.h" // TransformStep, TransformPosition
+#include "xcrypt.h"    // XorStream (optional encrypted output)
 
 namespace logpipe {
 
@@ -49,6 +50,19 @@ struct WriterOptions {
   CompressMode compress = CompressMode::None;
   bool daily_rotation = false;    // rotate when the calendar date changes
   bool per_source_files = false;  // one output file per input source
+  // Write buffering (write.buffer_lines / write.buffer_bytes): formatted
+  // output accumulates in memory and is flushed to the file when either
+  // threshold is crossed, on rotation, or at close(). 0 disables a threshold;
+  // both 0 = unbuffered (every line goes straight to the stream). A crash can
+  // lose everything still buffered, which the writer reports in the diag log
+  // when buffering is enabled.
+  uint64_t buffer_lines = 0;
+  uint64_t buffer_bytes = 0;
+  // Lightweight encryption (encrypt.password): non-empty enables the XOR
+  // keystream container (xcrypt.h) on the output files, applied AFTER
+  // compression (compress -> encrypt; readers reverse the order). The
+  // password itself is never logged or dumped (masked as *** everywhere).
+  std::string encrypt_password;
   // Injectable wall clock (epoch ms) used for daily rotation; defaults to
   // util::now_ms(). Tests inject a fixed clock to exercise date changes.
   std::function<int64_t()> clock;
@@ -89,8 +103,15 @@ class OutputSink {
 // both rotation triggers (size and day) coexist.
 //
 // Metrics: when a Metrics pointer is supplied, the writer reports rotations
-// (by size / by day, counted separately) and the compressed/raw byte totals.
+// (by size / by day, counted separately), the compressed/raw byte totals and
+// the in-memory buffer high-water marks (see Metrics::record_buffer_watermark).
 // Single-threaded use.
+//
+// Encryption (options.encrypt_password non-empty): the active file gains a
+// ".enc" extension, open_active() writes the LXEF magic + version header and
+// every payload chunk is XOR-encrypted through a per-file xcrypt::XorStream
+// (keystream restarts at offset 0 for each file, so each file decrypts
+// independently). Applied after compression.
 class RollingWriter : public OutputSink {
  public:
   explicit RollingWriter(const WriterOptions& options, Metrics* metrics = nullptr);
@@ -120,6 +141,7 @@ class RollingWriter : public OutputSink {
 
  private:
   bool open_active();
+  bool flush_buffer();         // spill the in-memory buffer into the stream
   bool rotate();               // size-triggered rotation (backup chain)
   bool rotate_daily();         // day-change rotation (date-named archives)
   std::string date_suffix() const;  // "YYYYMMDD" from the injected clock
@@ -128,15 +150,20 @@ class RollingWriter : public OutputSink {
   std::string format_line(const LogRecord& rec) const;
   std::string format_json_line(const LogRecord& rec) const;
   std::string encode_payload(const std::string& line) const;
+  bool buffering_enabled() const;
 
   WriterOptions options_;
   Metrics* metrics_ = nullptr;
   std::string stem_;   // base without extension, e.g. "logpipe_out"
-  std::string ext_;    // extension including the dot, e.g. ".log" (+ ".rle")
+  std::string ext_;    // extension including the dot, e.g. ".log" (+ ".rle"/".enc")
   std::ofstream out_;
   std::string active_name_;   // current active file name (no directory)
   std::string current_date_;  // date the active file was opened under
   uint64_t file_bytes_ = 0;   // bytes written to the current active file
+  // In-memory write buffer (see WriterOptions::buffer_lines / buffer_bytes).
+  std::vector<std::string> buffer_;  // exact on-disk bytes, one entry per line
+  uint64_t buffered_bytes_ = 0;      // sum of the on-disk sizes held in buffer_
+  mutable std::unique_ptr<xcrypt::XorStream> cipher_;  // active when encrypted
   bool failed_ = false;
 };
 
@@ -171,6 +198,16 @@ class PerSourceWriter : public OutputSink {
 // length-prefixed RLE frames) and concatenates all decoded lines into `out`.
 // Returns false on any malformed frame. Test/round-trip helper.
 bool read_compressed_output(const std::filesystem::path& path, std::string& out);
+
+// Reads an output file produced by RollingWriter and concatenates all lines
+// (newline-terminated) into `out`, reversing the configured encodings in the
+// order they were applied: XOR decryption first when `password` is non-empty
+// (LXEF container), then the RLE frame decoder when `compressed` is true.
+// Returns false on any malformed frame, wrong password or truncated
+// container. Test/round-trip helper.
+bool read_output_file(const std::filesystem::path& path,
+                      const std::string& password, bool compressed,
+                      std::string& out);
 
 // One branch of the fan-out group (requirement 1 + 2): a named output with
 // its own sink options, level threshold, optional DSL filter expression and

@@ -121,7 +121,8 @@ int main(int argc, char** argv) {
   const int64_t duration_limit_ms = static_cast<int64_t>(config.run_duration_sec) * 1000;
 
   // Wire the pipeline: reader threads -> queue -> main thread (this one).
-  BlockingQueue<RawLine> queue(1024);
+  // queue.capacity is config-driven (bounds-checked in config.cpp).
+  BlockingQueue<RawLine> queue(static_cast<size_t>(config.queue_capacity));
   LogParser parser;
   // The compiled filter.expr (if any) is wired in as the first filter stage;
   // threshold and keyword keep their existing behaviour after it.
@@ -175,6 +176,12 @@ int main(int argc, char** argv) {
   writer_options.compress = config.output_compress;
   writer_options.daily_rotation = config.rotate_daily;
   writer_options.per_source_files = config.per_source_files;
+  // Batched write buffer (write.buffer_lines / write.buffer_bytes) and the
+  // optional XOR output encryption (encrypt.password): both global, applied
+  // to every output route.
+  writer_options.buffer_lines = config.write_buffer_lines;
+  writer_options.buffer_bytes = config.write_buffer_bytes;
+  writer_options.encrypt_password = config.encrypt_password;
   std::unique_ptr<OutputSink> writer;
   if (config.outputs_explicit) {
     // Fan-out mode (requirement 1+2): one route per configured output, each
@@ -214,6 +221,7 @@ int main(int argc, char** argv) {
   TailOptions options;
   options.poll_ms = config.tail_poll_ms;
   options.offset_file = config.offset_file;
+  options.chunk_bytes = config.read_chunk_bytes;  // read.chunk_bytes, pre-validated
   Tailer tailer(config.input_files, queue, options);
   tailer.load_offsets();  // resume where a previous run stopped
 

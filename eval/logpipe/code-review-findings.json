@@ -1,209 +1,169 @@
 {
   "review": {
     "repo": "eval/logpipe",
-    "scope": "whole repo（12 文件 / 1597 行，双盲实现 + 2 轮迭代）",
-    "coverage": "覆盖：4 个维度批次（所有权/错误处理、并发/生命周期、一致性 §L/§M、头文件/魔数/构建）由 4 个独立 subagent 分头深读，主 agent 逐批抽查核实；未覆盖：性能维度（§6 未派发，LogParser 每行 std::regex 的吞吐成本仅记录未评估）、未实际编译运行、logpipe.conf 键值与代码边界的一致性抽查"
+    "scope": "whole repo（43 文件 / 12646 行，10 轮迭代后万行鉴定）",
+    "coverage": "覆盖：3 个维度批次（新模块正确性/资源、性能、一致性 §M/§L+魔数+构建）由 3 个独立 subagent 分头深读并核实调用链；聚焦 R4-R10 新增与重写的模块（config/writer/tail_engine/glob/xcrypt/rle/index_sidecar/transform/kv/prom/dsl/selftest）；未覆盖：tests 正文、并发维度（沿用 R2 批结论）、部分头文件全文、性能项未实测（均为调用链可证的确定性成本）"
   },
-  "summary": "logpipe 整体架构清晰：util 封装层被墙钟读取全面遵守、并发骨架（有界队列+双线程）经逐点核查无竞态、tail 续读/轮转/限流的状态机总体正确。最需要关注的三件事：一是 tailer.cpp 的 poll_file 在首次读到 EOF 后不清 failbit，导致文件追加的内容永远采集不到（tail 核心功能缺陷，Major）；二是 stdin 阻塞读使优雅停机可能卡死在 join 且二次 Ctrl-C 无逃生通道；三是时间读取约定（util.h 声明 MUST 走 util）被 tailer.cpp 的 steady_clock 直调打破，且大小写折叠/推送超时等小设施存在多处并行实现。修复轮将按 TDD-LOOP 处理行为类问题。",
+  "summary": "万行演化的 logpipe 总体健康：util 封装约定经全库测量零绕过、并发骨架经 R2 批核查无竞态、114 组测试覆盖充分。本轮鉴定最需要关注的三件事：一是加密输出的同日续写会向容器中部写入新 LXEF 头并使密钥流错位，续写后的输出永久无法解密（Major）；二是 glob 源的 make_tail_options 丢弃 replay/index 配置且从不加载索引，replay.since 对 glob 源静默失效、.idx 覆盖历史（Major）；三是 XOR 密钥流逐块从头重算导致加密/解密整体 O(n²)，多 MB 输出实际不可用（Major）。三者均为多轮迭代叠加出的集成缺陷——单轮看各自的代码都正确。",
   "systemic": [
     {
       "id": "S1",
-      "title": "无名字面量（魔数）散布在限流窗口、枚举基数、队列容量与退出码中",
-      "count": 11,
-      "examples": ["include/pipeline.h:235 (窗口 1000)", "include/pipeline.h:296 (level_counts_[5])", "src/main.cpp:64 (队列 1024)", "src/main.cpp:45-175 (退出码 2/3/4)", "src/config.cpp:107-132 (校验边界)"],
-      "recommendation": "为每处建立具名 constexpr 常量（kWindowMs、kLevelCount、kQueueCapacity、kExit*、各校验边界），单位写进名字；一次 PR 按 S1 逐点替换。"
+      "title": "校验边界与索引/扇出上界仍有无名字面量，且跨处不同步（fanout 9999 vs env 扫描 64、buffer 上界与错误消息双份拷贝）",
+      "count": 5,
+      "examples": ["src/config.cpp:519 (write.buffer_lines 上界 1e8)", "src/config.cpp:735 (env 扫描 64 与 parse 上界 9999 失同步)", "src/config.cpp:525 (1073741824 双份拷贝)"],
+      "recommendation": "沿用 R9 建立的 kMax* 常量约定补齐剩余边界，跨处共享同一常量。"
     }
   ],
   "findings": [
     {
       "id": "F1",
       "severity": "Major",
-      "category": "错误处理",
-      "file": "src/tailer.cpp",
-      "line": 154,
-      "title": "poll_file 不清 failbit：首次读到 EOF 后追加的数据永远读不到（tail 功能失效）",
-      "detail": "istream::read 短读（读到 EOF）会同时置 eofbit|failbit，而 sentry 在流非 good 时直接失败，后续 read 全部空操作。poll_file 循环内没有 clear()，ensure_open 只查 is_open()，handle_truncation 只在文件变小时重建——首次读到底之后，文件新增的行永远采集不到，直到截断或重启。审查批已用最小复现程序实验证实。",
-      "fix": "poll_file 循环内每次 read 前调用 file.stream.clear()（清除上一轮遗留的 eofbit/failbit），并补一个『写文件→读到 EOF→追加→应能读到新行』的回归单测。"
+      "category": "正确性/加密",
+      "file": "src/writer.cpp",
+      "line": 191,
+      "title": "加密输出的同日续写向容器中部再写 LXEF 头并使密钥流错位，续写后输出永久无法解密",
+      "detail": "open_active() 对已存在非空文件无条件重建 cipher_（密钥流从 0 开始）并写 5 字节 LXEF 头；daily_rotation 同日重启时不轮转而是 append，fresh_file=false 只跳过版本头、没跳过加密头——头被写在偏移 N 处却被 keystream[0..4] 加密，其后内容与 read 侧按整文件 keystream[0...] 的解密永久错位。同根因：append 时 file_bytes_=0 清零轮转计数。",
+      "fix": "仅 fresh_file 时重建 cipher_ 并写加密头；加密+续写要么显式报错轮转出备份链，要么按已有偏移同步密钥流并把 file_bytes_ 初始化为 existing 大小。"
     },
     {
       "id": "F2",
-      "severity": "Minor",
-      "category": "并发/停机活性",
-      "file": "src/main.cpp",
-      "line": 147,
-      "title": "优雅停机可能无限期阻塞在 stdin_thread.join()，第二次 Ctrl-C 无逃生通道",
-      "detail": "stdin 读线程阻塞在 getline 时不观察 stop_；配了文件源时主线程会卡在 join()，仅 stdin 源时队列永不关闭、主循环空转。信号处理器只置 g_stop，主线程已离开循环后二次信号无人检查——交互式终端下表现为 Ctrl-C 后假死（stdin_reader.h 已注释为已知限制，但缺强制退出手段）。",
-      "fix": "双管齐下：begin_shutdown 中关闭底层 stdin 句柄（Windows _close(0)/POSIX ::close(0)）解除阻塞读；handle_stop_signal 检测 g_stop 已为 true 时直接 std::_Exit(0) 兜底。"
+      "severity": "Major",
+      "category": "正确性/配置传导",
+      "file": "src/glob_source.cpp",
+      "line": 20,
+      "title": "make_tail_options 丢弃 replay/index 配置：glob 源 replay.since 静默失效、.idx 覆盖历史索引",
+      "detail": "make_tail_options 只拷贝 poll/offset/chunk 四项；GlobOptions 无 index_interval_bytes/replay_since_ms 字段，main 也未传入；GlobSource::run 不调 load_indexes/begin_replay——(1) replay.since 对 glob 源静默无效；(2) replay.index_interval_bytes=0（文档：0 禁用）被忽略仍生成 .idx；(3) 首次 save 用 tmp+rename 覆盖 sidecar，清掉历史索引条目。",
+      "fix": "GlobOptions 增补两字段并从 Config 填入透传；run() 在 load_offsets 后调 load_indexes()（按需 begin_replay()），与 Tailer 路径对齐。"
     },
     {
       "id": "F3",
-      "severity": "Minor",
-      "category": "错误处理",
-      "file": "src/writer.cpp",
-      "line": 190,
-      "title": "close() 的 flush 失败未检查：末尾缓冲日志可能静默丢失而退出码仍为 0",
-      "detail": "write() 的 good() 检查时数据多半还在流缓冲区，真正落盘发生在 close() 的 flush()；flush/close 失败不检查，main 按 write_failures==0 报 'run finished' 并返回 0。",
-      "fix": "close() 内 flush 后检查流状态，失败则 log_error 并记失败标志（新增 bool failed() const），main 据此置退出码 4。"
+      "severity": "Major",
+      "category": "性能/加密",
+      "file": "src/xcrypt.cpp",
+      "line": 29,
+      "title": "keystream 逐块从头重算，加密/解密整体 O(n²)：10MB 输出约 8.6e11 次 FNV 轮，实际不可用",
+      "detail": "keystream_block(password,index) 从 h_0 迭代 index 次；XorStream::apply 顺序推进却每块重新推导，B=n/8 块累计约 B²/2 次 FNV 轮（默认 10MB 上限时约 1.31M 块）。无任何记忆化，加密与解密同样受害。",
+      "fix": "XorStream 缓存当前块哈希、由 h_i 直接推导 h_{i+1}（每块 O(1)）；keystream_block 保留作已知答案用途；补跨块续算位一致性单测。"
     },
     {
       "id": "F4",
       "severity": "Minor",
-      "category": "错误处理",
-      "file": "src/config.cpp",
-      "line": 107,
-      "title": "rotate.size_bytes 负值经 stoull 回绕成巨大值，绕过下界校验静默禁用轮转",
-      "detail": "stoull 会完整消费 '-5' 并回绕为约 1.8e19（已实验验证），rotate.size_bytes 只有 '< 256' 下界检查，回绕值通过校验后 max_bytes_ 极大、轮转被静默禁用；与源码注释『负数会被范围检查兜住』的声明矛盾。",
-      "fix": "parse_u64 解析前拒绝带符号输入（首字符 '-'/'+' 直接 throw），或补上界检查（> 1<<40 抛错）。"
+      "category": "正确性",
+      "file": "src/tail_engine.cpp",
+      "line": 371,
+      "title": "对 std::vector 取 sizeof 当元素个数用（≈24 而非 chunk_bytes），靠巧合不出错",
+      "detail": "buffer 是 vector<char>(chunk_bytes)，`got < sizeof(buffer)` 比较的是对象大小；当前行为恰巧等价（短读后多读一次拿 0 退出），但 API 误用使方向依赖实现细节，且 got∈[24,chunk) 的短读总多付一次 read。",
+      "fix": "改为 got < buffer.size()。"
     },
     {
       "id": "F5",
       "severity": "Minor",
-      "category": "所有权",
-      "file": "src/main.cpp",
-      "line": 90,
-      "title": "主循环与线程 join 之间无异常屏障：异常穿透会 std::terminate 并丢失最终 offset 检查点",
-      "detail": "主循环内 parse/write/metrics 插表等均可抛异常（如 bad_alloc）；异常越过 joinable 的 std::thread 对象时析构直接 terminate，tailer.run() 的收尾 save_offsets() 不执行，重启后按旧 offset 重复采集整段数据。",
-      "fix": "把主循环到 writer.close() 包进 try/catch，异常路径落入既有 request_stop/join/close 清理序列后以非零码退出。"
+      "category": "错误处理",
+      "file": "src/rle.cpp",
+      "line": 88,
+      "title": "decompress 按输入可控的 64 位声明长度直接 reserve，损坏文件抛异常穿透 bool 契约",
+      "detail": "expected 来自容器内任意 8 字节；reserve 过大值抛 length_error/bad_alloc——其余失败路径都按约定返回 false，唯独这条让异常逃逸到调用方。",
+      "fix": "reserve 前做上限校验（超界 return false），或 try/catch 转换为 false 并记日志。"
     },
     {
       "id": "F6",
       "severity": "Minor",
-      "category": "所有权",
-      "file": "src/tailer.cpp",
-      "line": 161,
-      "title": "pending 缓冲无上限：无换行的超长单行（JSON 日志常见）会把整个文件读进内存直至 OOM",
-      "detail": "poll_file 把每次读到的字节全部 append 进 pending、只按 '\\n' 切分且 offset 不计入未完结行；GB 级无换行内容会让 pending 无界增长，截断检测也拦不住仍在增长的文件。",
-      "fix": "设 kMaxPendingBytes（如 16MB）上限：超限时告警、丢弃当前 pending 并把 offset 跳到文件末尾（或下一个换行处），避免单条异常行拖垮进程。"
+      "category": "正确性/重放",
+      "file": "src/index_sidecar.cpp",
+      "line": 135,
+      "title": "二分查找假设时间戳单调，乱序日志时 replay 可能定位到目标行之后并静默丢行",
+      "detail": "record_mark 只校验 offset 有序、不校验 ts；真实日志时间戳回跳时 entries 按 offset 有序而 ts 无序，upper_bound 结果任意——起点可能越过合格行，replay 静默不完整。",
+      "fix": "record_mark 检测 ts 回退时置『索引不可信』标记；find_start_offset 前检查，违反即返回 false 回退全文件扫描（正确性优先于定位速度）。"
     },
     {
       "id": "F7",
       "severity": "Minor",
-      "category": "一致性-M",
-      "file": "src/tailer.cpp",
-      "line": 197,
-      "title": "tailer.cpp 直调 std::chrono::steady_clock（3 处），绕过 util.h『时间读取必须走 util』的团队约定",
-      "detail": "util.h 头注释约定所有时间读取必须走 util 模块；墙钟 9 处全部经 util::now_ms，唯一直调时钟类的是 tailer 的 steady_clock（197/206/210，offset 落盘间隔与轮询计时）。用途属单调钟区间测量、用法本身正确，但 util 没有单调钟封装，约定在此出现唯一裂缝；同理 run.duration_sec 判断与 Metrics::summary 的 uptime 用墙钟测量，时钟跳变会偏移。",
-      "fix": "util 增加 int64_t steady_now_ms()（单调钟，注释标明仅用于区间测量）；tailer 三处与 uptime/duration 判断改走该封装，墙钟只保留给绝对时间戳场合。"
+      "category": "性能",
+      "file": "src/dsl.cpp",
+      "line": 108,
+      "title": "DSL 每行求值对常量 literal 重复 to_lower 分配（ci_* helper 每较 1-2 次堆分配）",
+      "detail": "filter.expr 在 fan-out 路由中逐行求值，属热路径；literal 是编译期常量却被逐行小写化。",
+      "fix": "编译期预小写 literal 存入 CompareNode，值侧改无分配逐字符比较。"
     },
     {
       "id": "F8",
       "severity": "Minor",
-      "category": "一致性-M",
-      "file": "include/pipeline.h",
-      "line": 40,
-      "title": "ASCII 大小写折叠 5 套手写实现并存（util/config/pipeline 三个模块）",
-      "detail": "level_from_string 大写循环、output_format_from_string 小写循环、LogFilter::to_lower+重建、config to_lower(string)、diag_level_from_string 大写循环——方向与形态各自漂移，行为目前一致但任何 Locale 层面修正需改 5 处。",
-      "fix": "util 提供 ascii_to_lower(const std::string&)（及按字符版），5 处全部改走统一实现。"
+      "category": "性能",
+      "file": "src/writer.cpp",
+      "line": 318,
+      "title": "format_line 每行构造 ostringstream 并两次整串拷贝；daily_rotation 每行重算日期串",
+      "detail": "stringstream 热路径格式化 + text+suffix 拷贝；date_suffix() 每行 localtime+snprintf 只为判断跨天——一天至多变一次。",
+      "fix": "可复用 string 拼接替代流；缓存当前日期、按 86400000ms 边界判断跨天。"
     },
     {
       "id": "F9",
       "severity": "Minor",
-      "category": "一致性-M",
-      "file": "src/tailer.cpp",
-      "line": 20,
-      "title": "kPushTimeoutMs 在 tailer.cpp 与 stdin_reader.cpp 重复定义（含相同注释）",
-      "detail": "两处 constexpr int kPushTimeoutMs = 200 各自定义，改其一则两个输入源的关停节奏静默分叉。",
-      "fix": "移到 pipeline.h BlockingQueue 旁（inline constexpr），两处删除本地定义。"
+      "category": "性能",
+      "file": "src/writer.cpp",
+      "line": 530,
+      "title": "FanOutWriter 对每条路由无条件整记录拷贝（含 fields map），被过滤路由也付费",
+      "detail": "route_accepts 实际不修改 work；无 transform 的路由可直接 const& 传递。",
+      "fix": "仅 transform 路径生成副本，其余以 const LogRecord& 传递。"
     },
     {
       "id": "F10",
       "severity": "Minor",
-      "category": "一致性-L",
-      "file": "src/config.cpp",
-      "line": 112,
-      "title": "配置键两种命名风格并存：12 个点分层级键 vs 3 个扁平键（output_format/max_lines_per_sec/stop_file）",
-      "detail": "点分风格占主导，output_format 与同域的 output.dir/output.file 风格不同，用户按层级直觉猜键会失败；logpipe.conf 两种都出现。",
-      "fix": "统一为点分层级（output.format、rate.max_lines_per_sec、run.stop_file），解析端保留旧键作一个过渡期别名，logpipe.conf 与文档标注 canonical 键名。"
+      "category": "性能",
+      "file": "src/tail_engine.cpp",
+      "line": 368,
+      "title": "poll_file 每行 pending.erase(0,n) 的 O(剩余) 前缀搬移 + 每 poll 每文件新分配读缓冲",
+      "detail": "块内行越短搬移越接近 O(chunk²/行长)；读缓冲每轮新建。",
+      "fix": "pending 维护扫描下标、整块处理后一次性收缩；读缓冲提升为引擎成员复用。"
     },
     {
       "id": "F11",
       "severity": "Minor",
       "category": "一致性-L",
-      "file": "include/pipeline.h",
-      "line": 86,
-      "title": "json_lines 的 ts 字段形态不统一：parsed 行原样透传、RAW 行归一化，机器消费面按来源分裂",
-      "detail": "timestamp_text 对解析行是源行原样（'T' 分隔、小数位 1-6 可变），RAW 行才是归一化格式；text 面向人可接受，json_lines 面向机器，严格解析器会按来源分裂。",
-      "fix": "先在 writer.h 固化 ts 字段契约（文档层面）；若下游需要稳定格式，json_lines 面将 ts 归一化、原文移入 raw_ts 字段。"
+      "file": "src/config.cpp",
+      "line": 915,
+      "title": "describe() 自由文本字段 keyword= 之后仍拼接十余个结构化字段（机器可读面不可靠）",
+      "detail": "keyword 值可含空格与 'xxx=' 字样，其后字段对脚本解析永远不可靠；describe 经 dump_config 落盘。",
+      "fix": "自由文本字段全部移到行尾，结构化字段前置。"
     },
     {
       "id": "F12",
       "severity": "Minor",
       "category": "一致性-L",
-      "file": "src/writer.cpp",
-      "line": 150,
-      "title": "text 行的结构化字段 |crc= 排在自由文本 message 之后，解析契约未固化",
-      "detail": "crc 必须覆盖 message 前缀所以只能排在最后（语义约束），但 message 可含任意空格与 'key=' 字样，朴素解析器用 first-match 切分会错；缓解因素是 crc 恒为行尾定宽 14 字节。",
-      "fix": "不改布局，在 writer.h 固化解析契约：取行尾锚定的最后一个 ' |crc='，其后必须恰为 8 位十六进制到行尾，禁止 first-match 切分，并给出示例。"
+      "file": "src/config.cpp",
+      "line": 911,
+      "title": "布尔值双拼写并存：describe() 用 on/off，--check-config 报告用 true/false",
+      "detail": "同一批字段两种渲染口径，消费方按字符串全等匹配漏一半。",
+      "fix": "describe 三处改用已有 bool_text()。"
     },
     {
       "id": "F13",
       "severity": "Minor",
-      "category": "一致性-L",
-      "file": "include/pipeline.h",
-      "line": 284,
-      "title": "运行汇总的标签列对齐被 'lines rate-dropped' 一行破坏（列结构不一致）",
-      "detail": "块内其他标签统一填到 15 列后接 ': '，该行标签 18 列导致值列右移，按列截取的脚本会错位。",
-      "fix": "改短标签 'lines dropped   : ' 或块内统一填充到 19 列。"
+      "category": "一致性-命名",
+      "file": "include/transform.h",
+      "line": 55,
+      "title": "TransformStep 公共数据结构成员用尾下划线，偏离全项目数据结构裸名主导约定",
+      "detail": "全部同类公共结构（OutputConfig/ConfigEntry 等）成员裸名、尾下划线仅用于带私有状态的类内部；该结构 kind 裸名与 pattern_/replacement_ 混用。",
+      "fix": "改名为 pattern/replacement，同步 transform.cpp/config.cpp 引用点。"
     },
     {
       "id": "F14",
-      "severity": "Minor",
-      "category": "一致性-L",
-      "file": "src/main.cpp",
-      "line": 44,
-      "title": "诊断消息前缀分叉：config 内部两种形态 + main.cpp 11 条无前缀，偏离 'module: message' 主导约定",
-      "detail": "tailer:/writer:/stdin reader: 前缀统一，但 config 警告走 'config <path>:<line>:' 而 throw 走 \"config: 'key'\"（grep 'config: ' 漏掉警告行），main.cpp 全部消息无前缀。",
-      "fix": "统一为 'logpipe: '（main）与 'config: <path>:<line>: '（config），.throw 消息保持 'config: ' 开头对齐。"
+      "severity": "Nit",
+      "category": "魔数",
+      "file": "src/config.cpp",
+      "line": 735,
+      "title": "S1 聚合：fanout 索引上界 9999（两处）与 env 扫描上界 64 不同步；write.buffer 上界与错误消息双份拷贝",
+      "detail": "LOGPIPE_OUTPUT_65_* 对 65..9999 静默失效；buffer 上界 1e8 与 kMaxLinesPerSec 同值不同义。",
+      "fix": "按 S1 建议补 constexpr 并跨处共享。"
     },
     {
       "id": "F15",
-      "severity": "Minor",
-      "category": "头文件",
-      "file": "include/config.h",
-      "line": 10,
-      "title": "config.h 仅为 Level/OutputFormat 两个枚举包含 pipeline.h，把 regex/mutex/sstream 等实现拖入所有消费者",
-      "detail": "注释自证只为了 Level；pipeline.h 同文件还有 BlockingQueue/LogParser/Metrics 等完整实现，等于包含 config.h 的每个翻译单元都编译依赖整条流水线实现。流水线各阶段共置本身合法，问题是共享『词汇表』枚举没有独立于实现。",
-      "fix": "把 Level/OutputFormat 及其字符串互转抽到叶头文件 levels.h（仅依赖 <string>），pipeline.h 与 config.h 改为包含它。"
-    },
-    {
-      "id": "F16",
-      "severity": "Minor",
-      "category": "错误处理",
-      "file": "src/main.cpp",
-      "line": 88,
-      "title": "std::signal 返回值未检查：注册失败时优雅停机静默失效",
-      "detail": "SIG_ERR 未检查；注册失败则 Ctrl-C 走默认处置直接杀死进程，save_offsets 最终检查点不执行。",
-      "fix": "检查返回值，失败时 log_warn('graceful stop disabled')，不阻断启动。"
-    },
-    {
-      "id": "F17",
-      "severity": "Nit",
-      "category": "魔数",
-      "file": "include/pipeline.h",
-      "line": 235,
-      "title": "S1 聚合：限流窗口 1000、level_counts_[5]×2 处、队列 1024、秒转毫秒 1000、pop 超时 200、退出码 2/3/4、config 各校验边界均为无名字面量",
-      "detail": "见 S1：单位与契约无名，改值需逐处搜索；level_counts_[5] 与 Level 枚举强耦合，加级别会静默漏统计/越界。",
-      "fix": "按 S1 建议逐点替换为具名 constexpr（kWindowMs/kLevelCount/kQueueCapacity/kExit*/kMinRotateSizeBytes 等），一次 PR 收敛。"
-    },
-    {
-      "id": "F18",
       "severity": "Nit",
       "category": "构建卫生",
       "file": "src/CMakeLists.txt",
-      "line": 18,
-      "title": "构建加固建议（去留由用户决定）：未开 warnings-as-errors；未启用任何加固/sanitizer",
-      "detail": "已开 /W4 /permissive- 与 -Wall -Wextra -Wpedantic（基础良好）；缺 -Werror//WX（零运行时代价，新告警不进 CI）、缺 /sdl、/guard:cf、-fstack-protector-strong、_GLIBCXX_ASSERTIONS（~0-3%，通常可忽略）、dev/CI 可选 -fsanitize=address,undefined（代价高：ASan 约 2x CPU / 2-3x 内存，绝不上 release）。是否开启由你决定。",
-      "fix": "如决定开启：第一方目标加 /WX 或 -Werror（窄口径 -Werror=return-type 亦可）；用 check_cxx_compiler_flag() 逐项探测后追加加固项；sanitizer 仅挂 Debug/CI 预设。"
-    },
-    {
-      "id": "F19",
-      "severity": "Nit",
-      "category": "god function",
-      "file": "src/main.cpp",
-      "line": 108,
-      "title": "main() 约 140 行：装配、主循环、收尾报告混在一个函数体",
-      "detail": "主循环 120-138 行混合编排与具体策略（parse→限流→过滤→写出），无法脱离进程单独测试；按漂移模式后续特性会继续往这里堆。已有 begin_shutdown 提取，尚可读。",
-      "fix": "提取 poll_stop_reason(...) 与 process_record(...) 两个辅助函数，main 只剩编排；装配段可提为 setup 函数。"
+      "line": 28,
+      "title": "构建建议（去留由用户决定）：-Werror/WX 缺失；加固项未启用；src 与 tests 的编译选项为复制粘贴",
+      "detail": "基线良好（/W4 /permissive-、-Wall -Wextra -Wpedantic）；硬化 ~0-3%，ASan 约 2x CPU / 2-3x 内存仅限 dev/CI；tests 36-40 行为同段复制，双改易漂移。",
+      "fix": "抽公共 INTERFACE 目标统一告警；-Werror 零代价可先加；check_cxx_compiler_flag 探测后按工具链追加。"
     }
   ]
 }

@@ -95,6 +95,72 @@ std::string timestamp_compact(int64_t epoch_ms) {
   return buffer;
 }
 
+bool parse_datetime_ms(const std::string& text, int64_t& out_ms) {
+  // Strict shape check: "YYYY-MM-DD HH:MM:SS" (19 chars), tolerating 'T' as
+  // the separator and an optional fractional part (".fff") afterwards. Every
+  // digit position is verified explicitly so garbage like "2026-99-99..." is
+  // rejected by the range checks below instead of being normalized away.
+  if (text.size() < 19) return false;
+  static const char* kShapes = "####-##-##X##:##:##";
+  for (int i = 0; i < 19; ++i) {
+    const char shape = kShapes[i];
+    const char c = text[static_cast<size_t>(i)];
+    if (shape == '#') {
+      if (c < '0' || c > '9') return false;
+    } else if (shape == 'X') {
+      if (c != ' ' && c != 'T' && c != 't') return false;
+    } else if (c != shape) {
+      return false;
+    }
+  }
+  auto digits = [&text](size_t from, size_t count) {
+    int value = 0;
+    for (size_t i = 0; i < count; ++i) {
+      value = value * 10 + (text[from + i] - '0');
+    }
+    return value;
+  };
+  const int year = digits(0, 4);
+  const int month = digits(5, 2);
+  const int day = digits(8, 2);
+  const int hour = digits(11, 2);
+  const int minute = digits(14, 2);
+  const int second = digits(17, 2);
+  if (month < 1 || month > 12) return false;
+  if (day < 1 || day > 31) return false;
+  if (hour > 23 || minute > 59 || second > 60) return false;  // 60: leap second
+
+  int millis = 0;
+  if (text.size() > 19 && text[19] == '.') {
+    size_t i = 20;
+    int digits_seen = 0;
+    int fraction = 0;
+    while (i < text.size() && text[i] >= '0' && text[i] <= '9' && digits_seen < 3) {
+      fraction = fraction * 10 + (text[i] - '0');
+      ++i;
+      ++digits_seen;
+    }
+    while (digits_seen < 3) {  // ".5" == 500ms
+      fraction *= 10;
+      ++digits_seen;
+    }
+    millis = fraction;
+  }
+
+  std::tm tm_value{};
+  tm_value.tm_year = year - 1900;
+  tm_value.tm_mon = month - 1;
+  tm_value.tm_mday = day;
+  tm_value.tm_hour = hour;
+  tm_value.tm_min = minute;
+  tm_value.tm_sec = second;
+  tm_value.tm_isdst = -1;  // let mktime resolve daylight saving time
+  const std::time_t seconds = std::mktime(&tm_value);
+  if (seconds == static_cast<std::time_t>(-1)) return false;
+  out_ms = static_cast<int64_t>(seconds) * 1000 + millis;
+  return true;
+}
+
 std::string format_duration(int64_t ms) {
   if (ms < 0) ms = 0;
   std::ostringstream out;

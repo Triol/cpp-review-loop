@@ -156,6 +156,7 @@ const std::vector<std::string>& known_keys() {
       "stats.dir",          "stats.keep_files",   "filter.level",
       "filter.keyword",     "filter.expr",        "tail.poll_ms",
       "state.offset_file",  "run.duration_sec",   "stop_file",
+      "replay.since",       "replay.index_interval_bytes",
       "diag.level",         "diag.file",          "active_profile",
       "write.buffer_lines", "write.buffer_bytes", "encrypt.password",
       "read.chunk_bytes",   "queue.capacity",     "glob.exclude",
@@ -514,6 +515,18 @@ void apply_entry(Config& config, const RawEntry& entry, bool& inputs_reset) {
     config.tail_poll_ms = parse_int(key, value, 20, 60000);
   } else if (key == "state.offset_file") {
     config.offset_file = value;
+  } else if (key == "replay.since") {
+    // Time-stamp replay start: strictly validated here so a malformed value
+    // aborts startup instead of silently disabling the replay mode.
+    int64_t since_ms = 0;
+    if (!util::parse_datetime_ms(value, since_ms)) {
+      throw std::runtime_error(
+          "config: 'replay.since' expects \"YYYY-MM-DD HH:MM:SS\", got '" + value + "'");
+    }
+    config.replay_since = value;
+    config.replay_since_ms = since_ms;
+  } else if (key == "replay.index_interval_bytes") {
+    config.replay_index_interval_bytes = parse_int(key, value, 64, 1073741824);
   } else if (key == "run.duration_sec") {
     config.run_duration_sec = parse_int(key, value, 0, 7 * 24 * 3600);
   } else if (key == "stop_file") {
@@ -572,6 +585,12 @@ std::string effective_value_of(const Config& config, const std::string& key) {
   if (key == "tail.poll_ms") return std::to_string(config.tail_poll_ms);
   if (key == "state.offset_file") {
     return config.offset_file.empty() ? "<off>" : config.offset_file.string();
+  }
+  if (key == "replay.since") {
+    return config.replay_since.empty() ? "<off>" : config.replay_since;
+  }
+  if (key == "replay.index_interval_bytes") {
+    return std::to_string(config.replay_index_interval_bytes);
   }
   if (key == "glob.exclude") {
     if (config.glob_exclude.empty()) return "<none>";
@@ -859,6 +878,8 @@ std::string Config::describe() const {
                            : std::string("off"))
       << " poll_ms=" << tail_poll_ms << " offsets="
       << (offset_file.empty() ? "<off>" : offset_file.string())
+      << " replay_since=" << (replay_since.empty() ? "<off>" : replay_since)
+      << " index_interval_bytes=" << replay_index_interval_bytes
       << " write_buffer=[lines=" << write_buffer_lines
       << " bytes=" << write_buffer_bytes << "]"
       << " read_chunk_bytes=" << read_chunk_bytes

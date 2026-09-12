@@ -172,6 +172,22 @@ struct Config {
   int tail_poll_ms = 500;
   std::filesystem::path offset_file{"logpipe_offsets.txt"};  // empty disables resume
 
+  // Time-stamp replay mode (see index_sidecar.h / tail_engine.h):
+  //   replay.since = "YYYY-MM-DD HH:MM:SS": when set, every tailed file is
+  //   positioned at startup at the sidecar index entry closest at/before the
+  //   requested time (or at offset 0 when no usable index exists) and lines
+  //   older than the timestamp are skipped until the first line whose in-line
+  //   timestamp is >= since; that line is the first one emitted. Empty (the
+  //   default) disables replay and restores plain tail/resume behaviour.
+  //   replay_since_ms is the parsed epoch-ms form (0 when disabled); the raw
+  //   text is kept for diagnostics/--dump-config.
+  //   replay.index_interval_bytes = N: sidecar index cadence - one
+  //   [file offset -> last line timestamp] entry every N consumed bytes per
+  //   tailed file ("<file>.idx" sidecar, flushed periodically and at stop).
+  std::string replay_since;
+  int64_t replay_since_ms = 0;
+  int replay_index_interval_bytes = 4096;
+
   // Runtime knobs.
   int run_duration_sec = 0;  // 0 = run until interrupted
   // Graceful stop trigger: the run ends when this file appears (empty = off).

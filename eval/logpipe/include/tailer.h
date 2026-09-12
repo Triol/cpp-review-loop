@@ -51,13 +51,25 @@ class Tailer : public ISource {
   void request_stop() override { stop_.store(true, std::memory_order_relaxed); }
 
   // Resume support. load_offsets() applies the state file written by a
-  // previous run; save_offsets() checkpoints the current positions.
+  // previous run; save_offsets() checkpoints the current positions. The
+  // sidecar line index (see index_sidecar.h) is loaded with load_indexes(),
+  // flushed by save_indexes() and positioned for replay.since by
+  // begin_replay() (called automatically at the start of run()).
   void load_offsets() { engine_.load_offsets(); }
   void save_offsets() { engine_.save_offsets(); }
+  void load_indexes() { engine_.load_indexes(); }
+  void save_indexes() { engine_.save_indexes(); }
+  void begin_replay() { engine_.begin_replay(); }
 
   uint64_t dropped_lines() const override {
     return engine_.dropped_lines();
   }
+
+  // Replay-mode counters (sidecar index hit/fallback positioning and the
+  // bytes skipped by the replay skip phase; see TailEngine).
+  uint64_t replay_index_hits() const { return engine_.replay_index_hits(); }
+  uint64_t replay_index_fallbacks() const { return engine_.replay_index_fallbacks(); }
+  uint64_t replay_skipped_bytes() const { return engine_.replay_skipped_bytes(); }
 
   // ---- ISource contract (source.h) ----------------------------------------
   SourceType type() const override { return SourceType::File; }

@@ -446,6 +446,13 @@ class Metrics {
     // and currently active source count keyed by "file" / "stdin" / "glob".
     std::map<std::string, uint64_t> source_type_lines;
     std::map<std::string, uint64_t> source_type_active;
+    // Time-stamp replay mode (replay.since): files positioned via the sidecar
+    // line index (hits) vs. full-file scan fallbacks, plus the number of
+    // bytes consumed by lines skipped because their in-line timestamp
+    // predates the requested replay start.
+    uint64_t replay_index_hits = 0;
+    uint64_t replay_index_fallbacks = 0;
+    uint64_t replay_skipped_bytes = 0;
     std::map<std::string, std::map<std::string, uint64_t>> kv_top_values;
   };
 
@@ -488,6 +495,9 @@ class Metrics {
     }
     snap.buffer_lines_high_water = buffer_lines_high_water_.load();
     snap.buffer_bytes_high_water = buffer_bytes_high_water_.load();
+    snap.replay_index_hits = replay_index_hits_.load();
+    snap.replay_index_fallbacks = replay_index_fallbacks_.load();
+    snap.replay_skipped_bytes = replay_skipped_bytes_.load();
     {
       std::lock_guard<std::mutex> lock(kv_mutex_);
       snap.kv_top_values = kv_value_counts_;
@@ -587,6 +597,28 @@ class Metrics {
   }
   uint64_t buffer_bytes_high_water() const {
     return buffer_bytes_high_water_.load(std::memory_order_relaxed);
+  }
+
+  // Replay-mode accounting (replay.since): one record_replay_index call per
+  // tailed file at startup (hit = positioned via the sidecar line index,
+  // fallback = full-file scan) and one record_replay_skipped_bytes call with
+  // the byte total of the lines the skip phase dropped.
+  void record_replay_index(uint64_t hits, uint64_t fallbacks) {
+    replay_index_hits_.fetch_add(hits, std::memory_order_relaxed);
+    replay_index_fallbacks_.fetch_add(fallbacks, std::memory_order_relaxed);
+  }
+  void record_replay_skipped_bytes(uint64_t bytes) {
+    replay_skipped_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+  }
+  // Read-only accessors for the replay counters (tests and summary).
+  uint64_t replay_index_hits() const {
+    return replay_index_hits_.load(std::memory_order_relaxed);
+  }
+  uint64_t replay_index_fallbacks() const {
+    return replay_index_fallbacks_.load(std::memory_order_relaxed);
+  }
+  uint64_t replay_skipped_bytes() const {
+    return replay_skipped_bytes_.load(std::memory_order_relaxed);
   }
 
   // KV extraction accounting (extract.kv = true): one record_kv_line call per
@@ -697,6 +729,11 @@ class Metrics {
           << "kv fields extracted: " << kv_fields_extracted_.load() << "\n"
           << "kv extraction rate : " << kv_extraction_rate_percent() << "%\n";
     }
+    if (replay_index_hits_.load() > 0 || replay_index_fallbacks_.load() > 0) {
+      out << "replay index hits     : " << replay_index_hits_.load() << "\n"
+          << "replay index fallbacks: " << replay_index_fallbacks_.load() << "\n"
+          << "replay skipped bytes  : " << replay_skipped_bytes_.load() << "\n";
+    }
     return out.str();
   }
 
@@ -742,6 +779,10 @@ class Metrics {
   // with a CAS loop so concurrent writers cannot lower a watermark.
   std::atomic<uint64_t> buffer_lines_high_water_{0};
   std::atomic<uint64_t> buffer_bytes_high_water_{0};
+  // Replay-mode counters (sidecar index positioning + skipped bytes).
+  std::atomic<uint64_t> replay_index_hits_{0};
+  std::atomic<uint64_t> replay_index_fallbacks_{0};
+  std::atomic<uint64_t> replay_skipped_bytes_{0};
   mutable std::mutex source_mutex_;  // guards source_counts_
   std::map<std::string, uint64_t> source_counts_;
   mutable std::mutex source_bytes_mutex_;  // guards source_written_bytes_

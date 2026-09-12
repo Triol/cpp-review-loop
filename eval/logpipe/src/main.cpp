@@ -232,6 +232,13 @@ int main(int argc, char** argv) {
     options.poll_ms = config.tail_poll_ms;
     options.offset_file = config.offset_file;
     options.chunk_bytes = config.read_chunk_bytes;  // read.chunk_bytes, pre-validated
+    // Sidecar line index cadence and the replay start (both config-driven;
+    // the replay only applies to the plain-file tailer).
+    options.index_interval_bytes = static_cast<uint64_t>(config.replay_index_interval_bytes);
+    options.replay_since_ms = config.replay_since_ms;
+    if (config.replay_since_ms > 0) {
+      util::log_info("logpipe: replay mode enabled: since \"" + config.replay_since + "\"");
+    }
 
     std::vector<FileSourceSpec> file_specs;
     for (const std::filesystem::path& path : config.input_files) {
@@ -356,7 +363,9 @@ int main(int argc, char** argv) {
     // PopResult::Timeout: loop around and re-evaluate the exit conditions.
     maybe_export_stats();
   }
-  // Final statistics export so short runs still produce a .prom file.
+  // Final statistics export so short runs still produce a .prom file; the
+  // replay counters are only known after the sources stopped (below), so a
+  // second export happens there when replay mode was active.
   if (stats_interval_ms > 0) {
     stats_writer.write(metrics.snapshot(/*kv_top_n=*/10));
   }
@@ -364,6 +373,25 @@ int main(int argc, char** argv) {
   for (std::unique_ptr<ISource>& source : sources) source->request_stop();  // no-op if already stopping
   for (std::unique_ptr<ISource>& source : sources) source->join();
   queue.close();  // safety net; the sources normally close it on their own
+
+  // Replay-mode accounting: collect the per-engine counters from the file
+  // sources now that their startup positioning is final, so the summary and
+  // the statistics export carry the hit/fallback/skipped-byte figures.
+  bool replay_used = false;
+  for (std::unique_ptr<ISource>& source : sources) {
+    Tailer* tailer = dynamic_cast<Tailer*>(source.get());
+    if (tailer == nullptr) continue;
+    if (tailer->replay_index_hits() > 0 || tailer->replay_index_fallbacks() > 0) {
+      replay_used = true;
+      metrics.record_replay_index(tailer->replay_index_hits(),
+                                  tailer->replay_index_fallbacks());
+      metrics.record_replay_skipped_bytes(tailer->replay_skipped_bytes());
+    }
+  }
+  if (replay_used && stats_interval_ms > 0) {
+    // Re-export so the .prom snapshot includes the replay counters.
+    stats_writer.write(metrics.snapshot(/*kv_top_n=*/10));
+  }
   for (std::unique_ptr<ISource>& source : sources) {
     if (source->dropped_lines() > 0) {
       util::log_debug("logpipe: source '" + source->name() + "' dropped " +

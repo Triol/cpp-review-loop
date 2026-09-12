@@ -46,12 +46,18 @@ void Tailer::join() {
 void Tailer::run() {
   util::log_info("tailer: started, " + std::to_string(engine_.file_count()) +
                  " input file(s)");
+  // Sidecar line indexes first (warm cache), then the replay positioning:
+  // begin_replay() overrides the resume offsets with the indexed/scan start
+  // for replay.since (no-op when replay is not configured).
+  engine_.load_indexes();
+  engine_.begin_replay();
+
   const int64_t save_interval_ms =
       static_cast<int64_t>(std::max(options_.offset_save_sec, 1)) * 1000;
   int64_t last_save_ms = util::steady_now_ms();
 
   while (!stop_.load(std::memory_order_relaxed)) {
-    engine_.poll_all(stop_);
+    engine_.poll_all(stop_);  // includes the sidecar index flush schedule
     if (!options_.offset_file.empty() &&
         util::steady_now_ms() - last_save_ms >= save_interval_ms) {
       engine_.save_offsets();
@@ -60,8 +66,9 @@ void Tailer::run() {
     std::this_thread::sleep_for(std::chrono::milliseconds(options_.poll_ms));
   }
 
-  engine_.save_offsets();  // final checkpoint, best effort
-  engine_.close_queue();   // end-of-stream for the consumer
+  engine_.save_offsets();   // final checkpoint, best effort
+  engine_.save_indexes();   // final sidecar flush, best effort
+  engine_.close_queue();    // end-of-stream for the consumer
   util::log_info("tailer: stopped");
   done_.store(true, std::memory_order_relaxed);
 }

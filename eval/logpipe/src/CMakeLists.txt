@@ -8,6 +8,7 @@ add_executable(logpipe
   kv_extractor.cpp
   prom_stats.cpp
   tail_engine.cpp
+  index_sidecar.cpp
   tailer.cpp
   glob_source.cpp
   stdin_reader.cpp

@@ -30,6 +30,15 @@ std::string format_time_ms(int64_t epoch_ms);
 // name is taken and for run bookkeeping.
 std::string timestamp_compact(int64_t epoch_ms);
 
+// Parses "YYYY-MM-DD HH:MM:SS" (local time; a 'T' separator and an optional
+// ".mmm"/".ffffff" fractional part after the seconds are tolerated, as in the
+// line parser patterns). Returns false and leaves `out_ms` untouched when the
+// text is not a well-formed calendar timestamp. The inverse of
+// format_time_ms() at second granularity; used by the replay.since config
+// key and by the tail sources to extract in-line timestamps for the sidecar
+// line index.
+bool parse_datetime_ms(const std::string& text, int64_t& out_ms);
+
 // Human readable span, e.g. "850ms", "12.3s", "1m02s".
 std::string format_duration(int64_t ms);
 

@@ -172,6 +172,17 @@ std::string PromStatsWriter::render(const Metrics::Snapshot& snap) {
              "KV extraction success rate, percent (0-100).",
              static_cast<uint64_t>(ratio));
 
+  // --- replay mode accounting (replay.since + sidecar line index). ----------
+  emit_counter(out, std::string(kPrefix) + "replay_index_hits_total",
+               "Files positioned via the sidecar line index at replay start.",
+               snap.replay_index_hits);
+  emit_counter(out, std::string(kPrefix) + "replay_index_fallbacks_total",
+               "Files replay-positioned by a full-file scan (no usable index).",
+               snap.replay_index_fallbacks);
+  emit_counter(out, std::string(kPrefix) + "replay_skipped_bytes_total",
+               "Bytes of pre-since lines skipped by the replay phase.",
+               snap.replay_skipped_bytes);
+
   // --- per-source breakdowns. -------------------------------------------------
   std::vector<std::pair<std::string, uint64_t>> source_samples(
       snap.source_counts.begin(), snap.source_counts.end());

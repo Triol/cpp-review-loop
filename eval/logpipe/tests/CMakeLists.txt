@@ -9,6 +9,7 @@ add_executable(logpipe_tests
   test_buffer_xcrypt.cpp
   test_sources.cpp
   test_replay.cpp
+  test_integration.cpp
   ../src/config.cpp
   ../src/dsl.cpp
   ../src/kv_extractor.cpp

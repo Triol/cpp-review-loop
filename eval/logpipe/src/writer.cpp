@@ -10,6 +10,7 @@
 #include <system_error>
 
 #include "util.h"
+#include "version.h"
 
 namespace logpipe {
 
@@ -171,6 +172,13 @@ bool RollingWriter::open() {
 bool RollingWriter::open_active() {
   if (out_.is_open()) out_.close();
   out_.clear();
+  // Fresh-file detection must happen BEFORE the open: the append-mode stream
+  // would create a missing file and make the size probe meaningless. A file
+  // that exists with content (restart resume, same-day daily rotation) is
+  // appended to as-is; a missing or empty file is stamped as new below.
+  std::error_code size_ec;
+  const uintmax_t existing = std::filesystem::file_size(active_path(), size_ec);
+  const bool fresh_file = size_ec ? true : existing == 0;
   out_.open(active_path(), std::ios::app | std::ios::binary);
   if (!out_.is_open()) {
     util::log_error("writer: cannot open output file '" + active_path().string() + "'");
@@ -196,7 +204,31 @@ bool RollingWriter::open_active() {
       return false;
     }
   }
+  // Versioned output header (see version.h): stamped through the normal
+  // encoding path, so text output opens with "#logpipe v... <format>
+  // created=<UTC>\n", RLE output carries it as the first decoded frame and
+  // encrypted output as the first payload chunk. Only fresh files are
+  // stamped; appended files keep their original header.
+  if (fresh_file && !write_version_header()) return false;
   util::log_info("writer: active output file '" + active_path().string() + "'");
+  return true;
+}
+
+// Writes the versioned output header into the (fresh) active file using the
+// same encode_payload() path as regular records: one chunk, counted into the
+// rotation accounting like any other bytes on disk.
+bool RollingWriter::write_version_header() {
+  const std::string header = output_version_header(
+      output_format_name(options_.format), options_.clock());
+  const std::string chunk = encode_payload(header);
+  out_.write(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+  if (!out_.good()) {
+    util::log_error("writer: cannot write version header to '" +
+                    active_path().string() + "'");
+    return false;
+  }
+  file_bytes_ += chunk.size();
+  util::log_debug("writer: version header stamped on '" + active_path().string() + "'");
   return true;
 }
 

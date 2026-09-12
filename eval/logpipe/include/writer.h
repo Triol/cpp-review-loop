@@ -112,6 +112,13 @@ class OutputSink {
 // every payload chunk is XOR-encrypted through a per-file xcrypt::XorStream
 // (keystream restarts at offset 0 for each file, so each file decrypts
 // independently). Applied after compression.
+//
+// Versioned output header (version.h): every FRESH output file (first open
+// and every rotation product) is stamped with one first line
+//   #logpipe v<version> <format> created=<UTC>
+// through the normal encoding path, so decoded/decrypted content always
+// starts with it. Files appended to (restart resume, same-day daily rotation)
+// are detected by their non-empty size and never stamped twice.
 class RollingWriter : public OutputSink {
  public:
   explicit RollingWriter(const WriterOptions& options, Metrics* metrics = nullptr);
@@ -141,6 +148,7 @@ class RollingWriter : public OutputSink {
 
  private:
   bool open_active();
+  bool write_version_header();  // stamps a fresh active file (see version.h)
   bool flush_buffer();         // spill the in-memory buffer into the stream
   bool rotate();               // size-triggered rotation (backup chain)
   bool rotate_daily();         // day-change rotation (date-named archives)

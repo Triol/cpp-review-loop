@@ -29,6 +29,18 @@ std::tm to_local_tm(int64_t epoch_ms) {
   return value;
 }
 
+// UTC twin of to_local_tm(): same epoch input, no timezone offset applied.
+std::tm to_utc_tm(int64_t epoch_ms) {
+  const std::time_t seconds = static_cast<std::time_t>(epoch_ms / 1000);
+  std::tm value{};
+#ifdef _WIN32
+  gmtime_s(&value, &seconds);
+#else
+  gmtime_r(&seconds, &value);
+#endif
+  return value;
+}
+
 // ---- diagnostic sink state, guarded by diag_mutex ---------------------------
 std::mutex diag_mutex;
 DiagLevel diag_level = DiagLevel::Info;
@@ -90,6 +102,15 @@ std::string timestamp_compact(int64_t epoch_ms) {
   const std::tm tm_value = to_local_tm(epoch_ms);
   char buffer[32];
   std::snprintf(buffer, sizeof(buffer), "%04d%02d%02d_%02d%02d%02d",
+                tm_value.tm_year + 1900, tm_value.tm_mon + 1, tm_value.tm_mday,
+                tm_value.tm_hour, tm_value.tm_min, tm_value.tm_sec);
+  return buffer;
+}
+
+std::string format_utc_time_sec(int64_t epoch_ms) {
+  const std::tm tm_value = to_utc_tm(epoch_ms);
+  char buffer[24];
+  std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02dT%02d:%02d:%02dZ",
                 tm_value.tm_year + 1900, tm_value.tm_mon + 1, tm_value.tm_mday,
                 tm_value.tm_hour, tm_value.tm_min, tm_value.tm_sec);
   return buffer;

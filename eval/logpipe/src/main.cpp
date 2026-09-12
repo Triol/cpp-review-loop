@@ -22,6 +22,7 @@
 #include "stdin_reader.h"
 #include "tailer.h"
 #include "util.h"
+#include "version.h"
 #include "writer.h"
 
 namespace logpipe {
@@ -122,7 +123,8 @@ int main(int argc, char** argv) {
   }
 
   util::init_diag(config.diag_level, config.diag_file);  // apply configured sink/verbosity
-  util::log_info("logpipe: starting (config: " + config_path + ")");
+  util::log_info(std::string("logpipe: starting v") + kProjectVersion +
+                 " (config: " + config_path + ")");
   util::log_debug("logpipe: config: " + config.describe());
   // Report the DSL filter state explicitly: it is the first filter stage and
   // changes which lines survive (demo output mirrors this in the summary log).

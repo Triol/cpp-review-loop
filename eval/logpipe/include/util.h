@@ -30,6 +30,12 @@ std::string format_time_ms(int64_t epoch_ms);
 // name is taken and for run bookkeeping.
 std::string timestamp_compact(int64_t epoch_ms);
 
+// UTC time as "YYYY-MM-DDTHH:MM:SSZ" (ISO-8601, second precision). Unlike the
+// local-time helpers above this deliberately ignores the host timezone, so
+// stamps embedded in output files (the versioned output header, see
+// version.h) stay comparable across machines.
+std::string format_utc_time_sec(int64_t epoch_ms);
+
 // Parses "YYYY-MM-DD HH:MM:SS" (local time; a 'T' separator and an optional
 // ".mmm"/".ffffff" fractional part after the seconds are tolerated, as in the
 // line parser patterns). Returns false and leaves `out_ms` untouched when the

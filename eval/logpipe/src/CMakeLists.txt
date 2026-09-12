@@ -1,6 +1,7 @@
 # logpipe executable: public headers live in ../include, sources in this dir.
 add_executable(logpipe
   main.cpp
+  selftest.cpp
   util.cpp
   rle.cpp
   config.cpp

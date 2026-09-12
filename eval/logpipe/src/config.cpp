@@ -156,6 +156,7 @@ const std::vector<std::string>& known_keys() {
       "stats.dir",          "stats.keep_files",   "filter.level",
       "filter.keyword",     "filter.expr",        "tail.poll_ms",
       "state.offset_file",  "run.duration_sec",   "stop_file",
+      "run.stop_file",      "rate.max_lines_per_sec",
       "replay.since",       "replay.index_interval_bytes",
       "diag.level",         "diag.file",          "active_profile",
       "write.buffer_lines", "write.buffer_bytes", "encrypt.password",
@@ -163,6 +164,40 @@ const std::vector<std::string>& known_keys() {
   };
   return keys;
 }
+
+// Deprecated spellings → canonical keys. A hit is warned about (once per
+// occurrence, with the config origin) and the value is parsed by the canonical
+// branch below — the map only changes the message, never the behaviour. Add a
+// pair here when renaming a key so migrations stay visible.
+const std::map<std::string, std::string>& deprecated_keys() {
+  static const std::map<std::string, std::string> keys = {
+      {"input.file", "input.files"},
+      {"rotate_daily", "rotate.daily"},
+      {"extract_kv", "extract.kv"},
+      {"output_format", "output.format"},
+      {"max_lines_per_sec", "rate.max_lines_per_sec"},
+      {"stop_file", "run.stop_file"},
+  };
+  return keys;
+}
+
+// Validation bounds (named so the contract is greppable and the error
+// messages cannot drift away from the checks they belong to).
+constexpr int kMinRotateSizeBytes = 256;
+constexpr int kMaxRotateBackups = 999;
+constexpr int kMaxLinesPerSec = 100000000;
+constexpr int kMinTailPollMs = 20;
+constexpr int kMaxTailPollMs = 60000;
+constexpr int kMaxRunDurationSec = 7 * 24 * 3600;  // one week
+constexpr int kMinReadChunkBytes = 128;
+constexpr int kMaxReadChunkBytes = 1048576;
+constexpr int kMinQueueCapacity = 1;
+constexpr int kMaxQueueCapacity = 1000000;
+constexpr int kMaxStatsIntervalSec = 86400;
+constexpr int kMinStatsKeepFiles = 1;
+constexpr int kMaxStatsKeepFiles = 10000;
+constexpr int kMinIndexIntervalBytes = 64;
+constexpr int kMaxIndexIntervalBytes = 1073741824;
 
 // The attributes accepted on the fan-out keys output.<N>.<attr>; used to
 // derive the environment-variable candidates and the report rows.
@@ -366,6 +401,14 @@ void apply_entry(Config& config, const RawEntry& entry, bool& inputs_reset) {
     return;
   }
 
+  // Deprecated spellings: warn with the config origin (the value is parsed by
+  // the canonical branch below — the map only changes the message).
+  const auto deprecated = deprecated_keys().find(key);
+  if (deprecated != deprecated_keys().end()) {
+    util::log_warn("config: " + entry.origin + ": deprecated key '" + key +
+                   "' — use '" + deprecated->second + "' instead");
+  }
+
   if (key == "input.files" || key == "input.file") {
     // A profile or environment override replaces the whole input list instead
     // of appending to whatever the file layer already produced.
@@ -445,15 +488,16 @@ void apply_entry(Config& config, const RawEntry& entry, bool& inputs_reset) {
     config.output_base = value;
   } else if (key == "rotate.size_bytes") {
     config.rotate_size_bytes = parse_u64(key, value);
-    if (config.rotate_size_bytes < 256) {
-      throw std::runtime_error("config: 'rotate.size_bytes' must be at least 256");
+    if (config.rotate_size_bytes < kMinRotateSizeBytes) {
+      throw std::runtime_error("config: 'rotate.size_bytes' must be at least " +
+                               std::to_string(kMinRotateSizeBytes));
     }
   } else if (key == "rotate.backups") {
-    config.rotate_backups = parse_int(key, value, 1, 999);
-  } else if (key == "output_format") {
+    config.rotate_backups = parse_int(key, value, 1, kMaxRotateBackups);
+  } else if (key == "output_format" || key == "output.format") {
     if (!output_format_from_string(value, config.output_format)) {
       throw std::runtime_error(
-          "config: 'output_format' expects text or json_lines, got '" + value + "'");
+          "config: '" + key + "' expects text or json_lines, got '" + value + "'");
     }
   } else if (key == "output.compress") {
     if (!compress_mode_from_string(value, config.output_compress)) {
@@ -487,22 +531,22 @@ void apply_entry(Config& config, const RawEntry& entry, bool& inputs_reset) {
     record("***");
     return;
   } else if (key == "read.chunk_bytes") {
-    config.read_chunk_bytes = parse_int(key, value, 128, 1048576);
+    config.read_chunk_bytes = parse_int(key, value, kMinReadChunkBytes, kMaxReadChunkBytes);
   } else if (key == "queue.capacity") {
-    config.queue_capacity = parse_int(key, value, 1, 1000000);
-  } else if (key == "max_lines_per_sec") {
-    config.max_lines_per_sec = parse_int(key, value, 0, 100000000);
+    config.queue_capacity = parse_int(key, value, kMinQueueCapacity, kMaxQueueCapacity);
+  } else if (key == "max_lines_per_sec" || key == "rate.max_lines_per_sec") {
+    config.max_lines_per_sec = parse_int(key, value, 0, kMaxLinesPerSec);
   } else if (key == "extract.kv" || key == "extract_kv") {
     if (!parse_bool(value, config.extract_kv)) {
       throw std::runtime_error("config: 'extract.kv' expects true or false, got '" +
                                value + "'");
     }
   } else if (key == "stats.interval_sec") {
-    config.stats_interval_sec = parse_int(key, value, 0, 86400);
+    config.stats_interval_sec = parse_int(key, value, 0, kMaxStatsIntervalSec);
   } else if (key == "stats.dir") {
     config.stats_dir = value;
   } else if (key == "stats.keep_files") {
-    config.stats_keep_files = parse_int(key, value, 1, 10000);
+    config.stats_keep_files = parse_int(key, value, kMinStatsKeepFiles, kMaxStatsKeepFiles);
   } else if (key == "filter.level") {
     config.level_threshold = parse_level_value(key, value);
   } else if (key == "filter.keyword") {
@@ -512,7 +556,7 @@ void apply_entry(Config& config, const RawEntry& entry, bool& inputs_reset) {
     // file is consumed so dsl errors surface before anything else runs.
     config.filter_expr_text = value;
   } else if (key == "tail.poll_ms") {
-    config.tail_poll_ms = parse_int(key, value, 20, 60000);
+    config.tail_poll_ms = parse_int(key, value, kMinTailPollMs, kMaxTailPollMs);
   } else if (key == "state.offset_file") {
     config.offset_file = value;
   } else if (key == "replay.since") {
@@ -526,10 +570,11 @@ void apply_entry(Config& config, const RawEntry& entry, bool& inputs_reset) {
     config.replay_since = value;
     config.replay_since_ms = since_ms;
   } else if (key == "replay.index_interval_bytes") {
-    config.replay_index_interval_bytes = parse_int(key, value, 64, 1073741824);
+    config.replay_index_interval_bytes =
+        parse_int(key, value, kMinIndexIntervalBytes, kMaxIndexIntervalBytes);
   } else if (key == "run.duration_sec") {
-    config.run_duration_sec = parse_int(key, value, 0, 7 * 24 * 3600);
-  } else if (key == "stop_file") {
+    config.run_duration_sec = parse_int(key, value, 0, kMaxRunDurationSec);
+  } else if (key == "stop_file" || key == "run.stop_file") {
     config.stop_file = value;
   } else if (key == "diag.level") {
     if (!util::diag_level_from_string(value, config.diag_level)) {

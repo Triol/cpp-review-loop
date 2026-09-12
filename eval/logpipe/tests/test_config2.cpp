@@ -9,6 +9,8 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+
+#include "util.h"
 #include <string>
 #include <system_error>
 
@@ -454,6 +456,62 @@ TEST(custom_level_in_dsl_expression) {
     threw = true;
   }
   CHECK(threw);
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// ---------------------------------------------------------------------------
+// R9: deprecated key spellings warn (diag file) and still apply; the new
+// canonical dotted spellings are accepted by the parser directly.
+// ---------------------------------------------------------------------------
+TEST(deprecated_keys_warn_and_still_apply) {
+  const fs::path dir = make_temp_dir("logpipe_r9_deprecated_");
+  logpipe::util::init_diag(logpipe::util::DiagLevel::Debug, (dir / "diag.log").string());
+  write_file(dir / "logpipe.conf",
+             "input.file = legacy.log\n"
+             "rotate_daily = true\n"
+             "extract_kv = true\n");
+  bool threw = false;
+  logpipe::Config config;
+  try {
+    config = logpipe::Config::load((dir / "logpipe.conf").string());
+  } catch (const std::exception&) {
+    threw = true;
+  }
+  CHECK(!threw);
+  CHECK(config.input_files.size() == 1);   // input.file applied
+  CHECK(config.rotate_daily);              // rotate_daily applied
+  CHECK(config.extract_kv);                // extract_kv applied
+  logpipe::util::init_diag(logpipe::util::DiagLevel::Info, "");  // back to stderr
+  std::ifstream diag(dir / "diag.log");
+  std::string diag_text((std::istreambuf_iterator<char>(diag)),
+                        std::istreambuf_iterator<char>());
+  CHECK(diag_text.find("deprecated key 'input.file'") != std::string::npos);
+  CHECK(diag_text.find("deprecated key 'rotate_daily'") != std::string::npos);
+  CHECK(diag_text.find("'input.files'") != std::string::npos);
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+TEST(canonical_dotted_spellings_accepted) {
+  const fs::path dir = make_temp_dir("logpipe_r9_canonical_");
+  write_file(dir / "logpipe.conf",
+             std::string(kMinimalInput) +
+                 "output.format = json_lines\n"
+                 "rate.max_lines_per_sec = 500\n"
+                 "run.stop_file = stop.now\n");
+  bool threw = false;
+  logpipe::Config config;
+  try {
+    config = logpipe::Config::load((dir / "logpipe.conf").string());
+  } catch (const std::exception& e) {
+    logpipe::util::log_error(std::string("canonical spellings rejected: ") + e.what());
+    threw = true;
+  }
+  CHECK(!threw);
+  CHECK(config.output_format == logpipe::OutputFormat::JsonLines);
+  CHECK(config.max_lines_per_sec == 500);
+  CHECK(config.stop_file == "stop.now");
   std::error_code ec;
   fs::remove_all(dir, ec);
 }

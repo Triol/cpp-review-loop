@@ -24,6 +24,11 @@
 #include "util.h"
 #include "writer.h"
 
+namespace logpipe {
+// Declared in selftest.cpp: runs the library invariants behind --self-test.
+int run_self_test();
+}  // namespace logpipe
+
 namespace {
 
 std::atomic<bool> g_stop{false};
@@ -57,6 +62,7 @@ int main(int argc, char** argv) {
   // --no-env disables the LOGPIPE_<KEY> environment override layer.
   bool dump_only = false;
   bool check_only = false;
+  bool self_test = false;
   bool use_env = true;
   std::string config_path = "logpipe.conf";
   bool config_path_seen = false;
@@ -66,6 +72,8 @@ int main(int argc, char** argv) {
       dump_only = true;
     } else if (arg == "--check-config") {
       check_only = true;
+    } else if (arg == "--self-test") {
+      self_test = true;
     } else if (arg == "--no-env") {
       use_env = false;
     } else if (!config_path_seen) {
@@ -76,6 +84,11 @@ int main(int argc, char** argv) {
           "usage: logpipe [config-file] [--dump-config] [--check-config] [--no-env]");
       return 2;
     }
+  }
+
+  // --self-test runs the library invariants and exits; no config is loaded.
+  if (self_test) {
+    return run_self_test();
   }
 
   Config config;
